@@ -59,6 +59,7 @@ mod track_status_request;
 mod unannounce;
 mod unsubscribe;
 mod unsubscribe_namespace;
+mod relay;
 
 pub use announce::*;
 pub use announce_cancel::*;
@@ -87,6 +88,7 @@ pub use track_status_request::*;
 pub use unannounce::*;
 pub use unsubscribe::*;
 pub use unsubscribe_namespace::*;
+pub use relay::*;
 
 use crate::coding::{Decode, DecodeError, Encode, EncodeError};
 use std::fmt;

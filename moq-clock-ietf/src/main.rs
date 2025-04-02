@@ -12,6 +12,7 @@ use moq_transport::{
     serve,
     session::{Publisher, Subscriber},
 };
+use std::sync::Arc;
 
 #[derive(Parser, Clone)]
 pub struct Cli {
@@ -67,16 +68,18 @@ async fn main() -> anyhow::Result<()> {
             .await
             .context("failed to create MoQ Transport session")?;
 
-        let (mut writer, _, reader) = serve::Tracks {
+        let (mut writer, _, reader) = Arc::new(serve::Tracks {
             namespace: Tuple::from_utf8_path(&config.namespace),
-        }
+        })
         .produce();
 
         let track = writer.create(&config.track).unwrap();
         let clock = clock::Publisher::new(track.groups()?);
 
+        let shared_state = moq_shared::SharedState::new();
+
         tokio::select! {
-            res = session.run() => res.context("session error")?,
+            res = session.run(shared_state) => res.context("session error")?,
             res = clock.run() => res.context("clock error")?,
             res = publisher.announce(reader) => res.context("failed to serve tracks")?,
         }
@@ -90,8 +93,10 @@ async fn main() -> anyhow::Result<()> {
 
         let clock = clock::Subscriber::new(sub);
 
+        let shared_state = moq_shared::SharedState::new();
+
         tokio::select! {
-            res = session.run() => res.context("session error")?,
+            res = session.run(shared_state) => res.context("session error")?,
             res = clock.run() => res.context("clock error")?,
             res = subscriber.subscribe(prod) => res.context("failed to subscribe to track")?,
         }

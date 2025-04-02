@@ -8,6 +8,8 @@ use moq_native_ietf::quic;
 use moq_sub::media::Media;
 use moq_transport::{coding::Tuple, serve::Tracks};
 
+use tokio::time::sleep;
+use std::sync::Arc;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env_logger::init();
@@ -18,32 +20,70 @@ async fn main() -> anyhow::Result<()> {
         .finish();
     tracing::subscriber::set_global_default(tracer).unwrap();
 
-    let out = tokio::io::stdout();
+    let mut config = Config::parse();
+    let mut url = config.url.clone();
+    let tracks = Arc::new(Tracks::new(Tuple::from_utf8_path(&config.name)));
 
-    let config = Config::parse();
-    let tls = config.tls.load()?;
-    let quic = quic::Endpoint::new(quic::Config {
-        bind: config.bind,
-        tls,
-    })?;
 
-    let session = quic.client.connect(&config.url).await?;
-
-    let (session, subscriber) = moq_transport::session::Subscriber::connect(session)
-        .await
-        .context("failed to create MoQ Transport session")?;
-
-    // Associate empty set of Tracks with provided namespace
-    let tracks = Tracks::new(Tuple::from_utf8_path(&config.name));
-
-    let mut media = Media::new(subscriber, tracks, out).await?;
-
-    tokio::select! {
-        res = session.run() => res.context("session error")?,
-        res = media.run() => res.context("media error")?,
+    loop {
+        match connect_to_other_session(config.clone(), url.clone(), tracks.clone()).await {
+            Ok(new_url) => {
+                url = new_url;
+                if let Some(port) = get_port(&url.to_string()) {
+                    config.bind.set_port(port);
+                }
+                break;
+            }
+            Err(e) => {
+                log::error!("Error occurred: {}. Retrying...", e);
+                sleep(std::time::Duration::from_secs(5)).await;
+            }
+        }
     }
 
+
     Ok(())
+}
+
+fn get_port(url_str: &str) -> Option<u16> {
+    Url::parse(url_str).ok()?.port()
+}
+
+async fn connect_to_other_session(config: Config, mut url: Url, t: Arc<Tracks>) -> anyhow::Result<Url> {
+    loop {
+        let out = tokio::io::stdout();
+        let tls = config.tls.load()?;
+        let quic = quic::Endpoint::new(quic::Config {
+            bind: config.bind,
+            tls,
+        })?;
+
+        sleep(std::time::Duration::from_secs(1)).await;
+
+        let session = quic.client.connect(&url).await?;
+        let (session, subscriber) = moq_transport::session::Subscriber::connect(session)
+            .await
+            .context("failed to create MoQ Transport session")?;
+
+
+        let mut media = Media::new(subscriber.clone(), t.clone(), out).await?;
+
+        let shared_state = moq_shared::SharedState::new();
+
+        let result = tokio::select! {
+            res = session.run(shared_state) => res.context("session error"),
+            res = media.run() => res.context("media error"),
+        };
+
+        match result {
+            Ok(_) => return Ok(url),
+            Err(e) => {
+                log::error!("Error occurred: {}. Retrying...", e);
+                url = Url::parse(&subscriber.get_url()).context("failed to parse URL")?;
+                log::info!("connecting to relay: url={}", url);
+            }
+        }
+    }
 }
 
 #[derive(Parser, Clone)]
@@ -72,6 +112,5 @@ fn moq_url(s: &str) -> Result<Url, String> {
     if url.scheme() != "https" && url.scheme() != "moqt" {
         return Err("url scheme must be https:// for WebTransport & moqt:// for QUIC".to_string());
     }
-
     Ok(url)
 }

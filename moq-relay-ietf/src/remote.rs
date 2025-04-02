@@ -214,8 +214,9 @@ impl RemoteProducer {
         let session = self.quic.connect(&self.url).await?;
         let (session, subscriber) = moq_transport::session::Subscriber::connect(session).await?;
 
+        let shared_state = moq_shared::SharedState::new();
         // Run the session
-        let mut session = session.run().boxed();
+        let mut session = session.run(shared_state).boxed();
         let mut tasks = FuturesUnordered::new();
 
         let mut done = None;
