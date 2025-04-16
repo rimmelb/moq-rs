@@ -58,8 +58,6 @@ async fn connect_to_other_session(config: Config, mut url: Url, t: Arc<Tracks>) 
             tls,
         })?;
 
-        sleep(std::time::Duration::from_secs(1)).await;
-
         let session = quic.client.connect(&url).await?;
         let (session, subscriber) = moq_transport::session::Subscriber::connect(session)
             .await
@@ -79,8 +77,22 @@ async fn connect_to_other_session(config: Config, mut url: Url, t: Arc<Tracks>) 
             Ok(_) => return Ok(url),
             Err(e) => {
                 log::error!("Error occurred: {}. Retrying...", e);
-                url = Url::parse(&subscriber.get_url()).context("failed to parse URL")?;
-                log::info!("connecting to relay: url={}", url);
+                match Url::parse(&subscriber.get_url()) {
+                    Ok(new_url) => {
+                        if new_url != url {
+                            log::info!("Switching to new URL: {}", new_url);
+                            url = new_url;
+                        }
+                    },
+                    Err(parse_err) => {
+                        log::error!(
+                            "Failed to parse new URL from subscriber: {}. Keeping current URL: {}",
+                            parse_err,
+                            url
+                        );
+                    }
+                }
+                sleep(std::time::Duration::from_secs(1)).await;
             }
         }
     }

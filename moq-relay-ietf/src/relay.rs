@@ -5,7 +5,6 @@ use anyhow::Context;
 use futures::{stream::FuturesUnordered, FutureExt, StreamExt};
 use moq_native_ietf::quic;
 use url::Url;
-use std::time::Duration;
 use moq_shared::SharedState;
 
 use crate::{Api, Consumer, Locals, Producer, Remotes, RemotesConsumer, RemotesProducer, Session};
@@ -38,7 +37,7 @@ pub struct Relay {
     relay_stopping_state: SharedState,
 }
 
-//for Goaway -> curl -X POST https:/localhost:4443/goaway
+//for Goaway -> curl -X POST "https://localhost:4443/goaway?url=https://localhost:4442&value=10"
 
 impl Relay {
     // Create a QUIC endpoint that can be used for both clients and servers.
@@ -123,6 +122,7 @@ impl Relay {
 
         loop {
             tokio::select! {
+
                 res = server.accept() => {
                     let conn = res.context("failed to accept QUIC connection")?;
                     let locals = self.locals.clone();
@@ -147,20 +147,16 @@ impl Relay {
                             consumer: subscriber.map(|subscriber| Consumer::new(subscriber, locals, api, forward)),
                         };
 
-                        if let Err(err) = session.run(shared_state).await {
-                            log::warn!("failed to run MoQ session: {}", err);
-                        }
+                            if let Err(err) = session.run(shared_state).await {
+                                log::warn!("failed to run MoQ session: {}", err);
+                            }
+
+
                         Ok(())
                     }.boxed());
                 },
 
                 res = tasks.next(), if !tasks.is_empty() => res.unwrap()?,
-
-                _ = relay_stopping_state.wait_for_change() => {
-                    tokio::time::sleep(Duration::from_secs(2)).await;
-                    log::info!("shared_state changed, stopping relay...");
-                    break Ok(());
-                }
             }
         }
     }

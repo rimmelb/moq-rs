@@ -1,9 +1,17 @@
 use std::{net, sync::Arc};
 use moq_shared::SharedState;
 
-use axum::{extract::State, http::Method, response::IntoResponse, routing::get, Router};
+use axum::{extract::{State, Query}, http::Method, response::IntoResponse, routing::get, Router};
 use hyper_serve::tls_rustls::RustlsAcceptor;
 use tower_http::cors::{Any, CorsLayer};
+use serde::Deserialize;
+
+
+#[derive(Deserialize)]
+struct GoawayParams {
+    url: String,
+    value: u64,
+}
 
 pub struct WebConfig {
     pub bind: net::SocketAddr,
@@ -42,13 +50,23 @@ impl Web {
             .route(
                 "/goaway",
                 axum::routing::post({
-                    move || {
+                    move |Query(params): Query<GoawayParams>| {
                         let shared_state = shared_state.clone();
-                        let relay_stopping_state = relay_stopping_state.clone();
+                        let _relay_stopping_state = relay_stopping_state.clone();
                         async move {
-                            shared_state.update();
-                            relay_stopping_state.update();
-                            "State updated".to_string()
+                            let mut response = String::new();
+                            match url::Url::parse(&params.url) {
+                                Ok(parsed_url) => {
+                                    shared_state.update_with_url(parsed_url);
+                                    response.push_str("URL updated. ");
+                                }
+                                Err(err) => {
+                                    response.push_str(&format!("Invalid URL parameter: {}. ", err));
+                                }
+                            }
+                            shared_state.update_with_int(params.value);
+                            response.push_str("Integer value updated.");
+                            response
                         }
                     }
                 }),

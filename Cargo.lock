@@ -1263,6 +1263,7 @@ dependencies = [
  "moq-shared",
  "moq-transport",
  "reqwest 0.11.27",
+ "serde",
  "tokio",
  "tower-http",
  "tracing",
@@ -1275,6 +1276,7 @@ name = "moq-shared"
 version = "0.1.0"
 dependencies = [
  "tokio",
+ "url",
 ]
 
 [[package]]
