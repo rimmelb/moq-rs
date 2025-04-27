@@ -10,7 +10,7 @@ mod clock;
 use moq_transport::{
     coding::Tuple,
     serve,
-    session::{Publisher, Subscriber},
+    session::{Publisher, Subscriber, SharedState},
 };
 use std::sync::Arc;
 
@@ -76,7 +76,7 @@ async fn main() -> anyhow::Result<()> {
         let track = writer.create(&config.track).unwrap();
         let clock = clock::Publisher::new(track.groups()?);
 
-        let shared_state = moq_shared::SharedState::new();
+        let shared_state = SharedState::new();
 
         tokio::select! {
             res = session.run(shared_state) => res.context("session error")?,
@@ -93,7 +93,7 @@ async fn main() -> anyhow::Result<()> {
 
         let clock = clock::Subscriber::new(sub);
 
-        let shared_state = moq_shared::SharedState::new();
+        let shared_state = SharedState::new();
 
         tokio::select! {
             res = session.run(shared_state) => res.context("session error")?,

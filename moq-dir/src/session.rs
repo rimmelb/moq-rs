@@ -1,5 +1,5 @@
 use futures::{stream::FuturesUnordered, FutureExt, StreamExt};
-use moq_transport::session::{Announced, Publisher, Subscriber};
+use moq_transport::session::{Announced, Publisher, Subscriber, SharedState};
 
 use crate::Listings;
 
@@ -20,7 +20,7 @@ impl Session {
             moq_transport::session::Session::accept(session).await?;
 
         let mut tasks = FuturesUnordered::new();
-        let shared_state = moq_shared::SharedState::new();
+        let shared_state = SharedState::new();
 
         tasks.push(async move { session.run(shared_state).await.map_err(Into::into) }.boxed());
 

@@ -13,7 +13,7 @@ use tokio::time::sleep;
 
 use moq_native_ietf::quic;
 use moq_pub::Media;
-use moq_transport::{coding::Tuple, serve::{self, TracksReader}, session::Publisher};
+use moq_transport::{coding::Tuple, serve::{self, TracksReader}, session::Publisher, session::SharedState};
 
 #[derive(Parser, Clone)]
 pub struct Cli {
@@ -134,7 +134,7 @@ async fn connect_to_other_session(cli: Cli, mut url: Url, r: TracksReader) -> an
             }
         };
 
-        let shared_state = moq_shared::SharedState::new();
+        let shared_state = SharedState::new();
 
         let result = tokio::select! {
             res = session.run(shared_state) => res.context("session error"),
