@@ -191,7 +191,7 @@ impl Session {
 
     pub async fn raise_goaway_timeout_error(shared_state: SharedState) -> Result<(), SessionError> {
         tokio::time::sleep(std::time::Duration::from_secs(shared_state.get_value().unwrap_or(10))).await;
-        return Err(SessionError::GoawayTimeout(OfficialError::GoawayTimeout));
+        Err(SessionError::GoawayTimeout(OfficialError::GoawayTimeout))
     }
 
     async fn run_send(
