@@ -6,6 +6,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.5](https://github.com/rimmelb/moq-rs/compare/moq-relay-ietf-v0.7.4...moq-relay-ietf-v0.7.5) - 2025-04-27
+
+### Other
+
+- GoawayTimeout return
+- Időzítő megadható az URL-ben is
+- GoAway function-nel kiegészített kód
+
 ## [0.7.4](https://github.com/englishm/moq-rs/compare/moq-relay-ietf-v0.7.3...moq-relay-ietf-v0.7.4) - 2025-02-24
 
 ### Other
