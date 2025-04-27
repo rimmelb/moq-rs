@@ -169,26 +169,25 @@ impl Session {
         let shared_state = shared_state.clone();
         let sender_2 = sender.clone();
 
-        let goaway_future = Self::run_goaway(sender_2, shared_state);
+        let run_goaway = Self::execute_goaway(sender_2, shared_state);
 
         tokio::select! {
             res = Self::run_recv(self.recver, self.publisher, self.subscriber.clone()) => res,
             res = Self::run_send(self.sender, self.outgoing) => res,
             res = Self::run_streams(self.webtransport.clone(), self.subscriber.clone()) => res,
             res = Self::run_datagrams(self.webtransport, self.subscriber) => res,
-            res = goaway_future => res,
+            res = run_goaway => res,
             }
         }
 
-    async fn run_goaway(sender: Arc<Mutex<Writer>>, shared_state: moq_shared::SharedState) -> Result<(), SessionError> {
+    async fn execute_goaway(sender: Arc<Mutex<Writer>>, shared_state: moq_shared::SharedState) -> Result<(), SessionError> {
         let shared_state_clone = shared_state.clone();
-        Self::handle_goaway(sender, shared_state.clone()).await?;
-        Self::goaway_timeout_sender(shared_state_clone).await
+        Self::goaway_message_send(sender, shared_state.clone()).await?;
+        Self::raise_goaway_timeout_error(shared_state_clone).await
     }
 
 
-    pub async fn goaway_timeout_sender(shared_state: moq_shared::SharedState) -> Result<(), SessionError> {
-
+    pub async fn raise_goaway_timeout_error(shared_state: moq_shared::SharedState) -> Result<(), SessionError> {
         tokio::time::sleep(std::time::Duration::from_secs(shared_state.get_value().unwrap_or(10))).await;
         return Err(SessionError::GoawayTimeout(OfficialError::GoawayTimeout));
     }
@@ -205,7 +204,7 @@ impl Session {
         Ok(())
     }
 
-    async fn handle_goaway(
+    async fn goaway_message_send(
         sender: Arc<Mutex<Writer>>,
         shared_state: moq_shared::SharedState,
     ) -> Result<(), SessionError> {
@@ -214,7 +213,6 @@ impl Session {
                 let msg = message::Message::GoAway(message::GoAway {
                 url: shared_state.get_url().unwrap().to_string(),
                 });
-                log::info!("lefutsz");
                 let mut sender = sender.lock().await;
                 sender.encode(&msg).await?;
             }

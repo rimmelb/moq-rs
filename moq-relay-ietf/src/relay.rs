@@ -37,7 +37,7 @@ pub struct Relay {
     relay_stopping_state: SharedState,
 }
 
-//for Goaway -> curl -X POST "https://localhost:4443/goaway?url=https://localhost:4442&value=10"
+//for Goaway -> curl -X POST "https://localhost:4443/goaway?url=https://localhost:4442&value=5"
 
 impl Relay {
     // Create a QUIC endpoint that can be used for both clients and servers.

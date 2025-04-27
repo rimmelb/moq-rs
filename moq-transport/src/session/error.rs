@@ -47,7 +47,7 @@ pub enum SessionError {
     #[error("wrong size")]
     WrongSize,
 
-    #[error("GoawayTimeot")]
+    #[error("GoawayTimeout")]
     GoawayTimeout(#[from] error::SessionError),
 }
 
