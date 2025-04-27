@@ -6,6 +6,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0](https://github.com/rimmelb/moq-rs/compare/moq-transport-v0.10.0...moq-transport-v0.11.0) - 2025-04-27
+
+### Fixed
+
+- fixed problem concerning a return in mod.rs
+
+### Other
+
+- Deleted moq-shared and moved to moq_transport::session
+- GoawayTimeout return
+- Időzítő megadható az URL-ben is
+- GoAway function-nel kiegészített kód
+
 ## [0.10.0](https://github.com/englishm/moq-rs/compare/moq-transport-v0.9.0...moq-transport-v0.10.0) - 2025-02-24
 
 ### Fixed
