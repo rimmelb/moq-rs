@@ -64,7 +64,6 @@ impl SharedState {
     }
 }
 
-
 impl Default for SharedState {
     fn default() -> Self {
         Self::new()

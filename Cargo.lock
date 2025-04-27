@@ -1175,7 +1175,6 @@ dependencies = [
  "env_logger",
  "log",
  "moq-native-ietf",
- "moq-shared",
  "moq-transport",
  "tokio",
  "tracing",
@@ -1194,7 +1193,6 @@ dependencies = [
  "futures",
  "log",
  "moq-native-ietf",
- "moq-shared",
  "moq-transport",
  "tokio",
  "tracing",
@@ -1235,7 +1233,6 @@ dependencies = [
  "log",
  "moq-catalog",
  "moq-native-ietf",
- "moq-shared",
  "moq-transport",
  "mp4",
  "rfc6381-codec",
@@ -1260,7 +1257,6 @@ dependencies = [
  "log",
  "moq-api",
  "moq-native-ietf",
- "moq-shared",
  "moq-transport",
  "reqwest 0.11.27",
  "serde",
@@ -1268,14 +1264,6 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
- "url",
-]
-
-[[package]]
-name = "moq-shared"
-version = "0.1.0"
-dependencies = [
- "tokio",
  "url",
 ]
 
@@ -1288,7 +1276,6 @@ dependencies = [
  "env_logger",
  "log",
  "moq-native-ietf",
- "moq-shared",
  "moq-transport",
  "mp4",
  "tokio",
@@ -1305,10 +1292,10 @@ dependencies = [
  "bytes",
  "futures",
  "log",
- "moq-shared",
  "paste",
  "thiserror",
  "tokio",
+ "url",
  "web-transport",
 ]
 

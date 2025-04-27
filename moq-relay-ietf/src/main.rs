@@ -20,6 +20,7 @@ pub use web::*;
 
 use std::net;
 use url::Url;
+use moq_transport::session::SharedState;
 
 #[derive(Parser, Clone)]
 pub struct Cli {
@@ -69,8 +70,8 @@ async fn main() -> anyhow::Result<()> {
         anyhow::bail!("missing TLS certificates");
     }
 
-    let shared_state = moq_shared::SharedState::new();
-    let relay_stopping_state = moq_shared::SharedState::new();
+    let shared_state = SharedState::new();
+    let relay_stopping_state = SharedState::new();
 
     // Create a QUIC server for media.
     let relay = Relay::new(RelayConfig {
