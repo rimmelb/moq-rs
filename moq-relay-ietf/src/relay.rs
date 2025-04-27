@@ -5,6 +5,7 @@ use anyhow::Context;
 use futures::{stream::FuturesUnordered, FutureExt, StreamExt};
 use moq_native_ietf::quic;
 use url::Url;
+use moq_shared::SharedState;
 
 use crate::{Api, Consumer, Locals, Producer, Remotes, RemotesConsumer, RemotesProducer, Session};
 
@@ -32,11 +33,15 @@ pub struct Relay {
     locals: Locals,
     api: Option<Api>,
     remotes: Option<(RemotesProducer, RemotesConsumer)>,
+    shared_state: SharedState,
+    relay_stopping_state: SharedState,
 }
+
+//for Goaway -> curl -X POST "https://localhost:4443/goaway?url=https://localhost:4442&value=5"
 
 impl Relay {
     // Create a QUIC endpoint that can be used for both clients and servers.
-    pub fn new(config: RelayConfig) -> anyhow::Result<Self> {
+    pub fn new(config: RelayConfig, shared_state: SharedState, relay_stopping_state: SharedState) -> anyhow::Result<Self> {
         let quic = quic::Endpoint::new(quic::Config {
             bind: config.bind,
             tls: config.tls,
@@ -65,6 +70,8 @@ impl Relay {
             api,
             locals,
             remotes,
+            shared_state,
+            relay_stopping_state
         })
     }
 
@@ -99,10 +106,9 @@ impl Relay {
                 )),
                 consumer: Some(Consumer::new(subscriber, self.locals.clone(), None, None)),
             };
-
+            let shared_state = self.shared_state.clone();
             let forward = session.producer.clone();
-
-            tasks.push(async move { session.run().await.context("forwarding failed") }.boxed());
+            tasks.push(async move { session.run(shared_state).await.context("forwarding failed") }.boxed());
 
             forward
         } else {
@@ -111,16 +117,20 @@ impl Relay {
 
         let mut server = self.quic.server.context("missing TLS certificate")?;
         log::info!("listening on {}", server.local_addr()?);
+        let shared_state = self.shared_state.clone();
+        let relay_stopping_state = self.relay_stopping_state.clone();
 
         loop {
             tokio::select! {
+
                 res = server.accept() => {
                     let conn = res.context("failed to accept QUIC connection")?;
-
                     let locals = self.locals.clone();
                     let remotes = remotes.clone();
                     let forward = forward.clone();
                     let api = self.api.clone();
+                    let shared_state = shared_state.clone();
+                    let _relay_stopping_state = relay_stopping_state.clone();
 
                     tasks.push(async move {
                         let (session, publisher, subscriber) = match moq_transport::session::Session::accept(conn).await {
@@ -137,13 +147,15 @@ impl Relay {
                             consumer: subscriber.map(|subscriber| Consumer::new(subscriber, locals, api, forward)),
                         };
 
-                        if let Err(err) = session.run().await {
-                            log::warn!("failed to run MoQ session: {}", err);
-                        }
+                            if let Err(err) = session.run(shared_state).await {
+                                log::warn!("failed to run MoQ session: {}", err);
+                            }
+
 
                         Ok(())
                     }.boxed());
                 },
+
                 res = tasks.next(), if !tasks.is_empty() => res.unwrap()?,
             }
         }

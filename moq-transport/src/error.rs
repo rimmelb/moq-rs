@@ -1,5 +1,5 @@
 /// An error that causes the session to close.
-#[derive(thiserror::Error, Debug)]
+#[derive(thiserror::Error, Debug, Clone)]
 pub enum SessionError {
     // Official error codes
     #[error("no error")]
