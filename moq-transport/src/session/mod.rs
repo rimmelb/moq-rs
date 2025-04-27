@@ -8,11 +8,13 @@ mod subscribed;
 mod subscriber;
 mod track_status_requested;
 mod writer;
+mod shared;
 
 pub use announce::*;
 pub use announced::*;
 pub use error::*;
 pub use publisher::*;
+pub use shared::SharedState;
 pub use subscribe::*;
 pub use subscribed::*;
 pub use subscriber::*;
@@ -164,7 +166,7 @@ impl Session {
         Ok(Session::new(session, sender, recver, role))
     }
 
-    pub async fn run(self, shared_state: moq_shared::SharedState) -> Result<(), SessionError> {
+    pub async fn run(self, shared_state: SharedState) -> Result<(), SessionError> {
         let sender = self.sender.clone();
         let shared_state = shared_state.clone();
         let sender_2 = sender.clone();
@@ -180,16 +182,16 @@ impl Session {
             }
         }
 
-    async fn execute_goaway(sender: Arc<Mutex<Writer>>, shared_state: moq_shared::SharedState) -> Result<(), SessionError> {
+    async fn execute_goaway(sender: Arc<Mutex<Writer>>, shared_state: SharedState) -> Result<(), SessionError> {
         let shared_state_clone = shared_state.clone();
         Self::goaway_message_send(sender, shared_state.clone()).await?;
         Self::raise_goaway_timeout_error(shared_state_clone).await
     }
 
 
-    pub async fn raise_goaway_timeout_error(shared_state: moq_shared::SharedState) -> Result<(), SessionError> {
+    pub async fn raise_goaway_timeout_error(shared_state: SharedState) -> Result<(), SessionError> {
         tokio::time::sleep(std::time::Duration::from_secs(shared_state.get_value().unwrap_or(10))).await;
-        return Err(SessionError::GoawayTimeout(OfficialError::GoawayTimeout));
+        Err(SessionError::GoawayTimeout(OfficialError::GoawayTimeout))
     }
 
     async fn run_send(
@@ -206,7 +208,7 @@ impl Session {
 
     async fn goaway_message_send(
         sender: Arc<Mutex<Writer>>,
-        shared_state: moq_shared::SharedState,
+        shared_state: SharedState,
     ) -> Result<(), SessionError> {
         tokio::select! {
             _ = shared_state.wait_for_change() => {

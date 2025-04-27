@@ -63,3 +63,9 @@ impl SharedState {
         self.notifier.notified().await;
     }
 }
+
+impl Default for SharedState {
+    fn default() -> Self {
+        Self::new()
+    }
+}

@@ -6,7 +6,7 @@ use url::Url;
 
 use moq_native_ietf::quic;
 use moq_sub::media::Media;
-use moq_transport::{coding::Tuple, serve::Tracks};
+use moq_transport::{coding::Tuple, serve::Tracks, session::SharedState};
 
 use tokio::time::sleep;
 use std::sync::Arc;
@@ -29,7 +29,7 @@ async fn main() -> anyhow::Result<()> {
         match connect_to_other_session(config.clone(), url.clone(), tracks.clone()).await {
             Ok(new_url) => {
                 url = new_url;
-                if let Some(port) = get_port(&url.to_string()) {
+                if let Some(port) = get_port(url.as_ref()) {
                     config.bind.set_port(port);
                 }
                 break;
@@ -66,7 +66,7 @@ async fn connect_to_other_session(config: Config, mut url: Url, t: Arc<Tracks>) 
 
         let mut media = Media::new(subscriber.clone(), t.clone(), out).await?;
 
-        let shared_state = moq_shared::SharedState::new();
+        let shared_state = SharedState::new();
 
         let result = tokio::select! {
             res = session.run(shared_state) => res.context("session error"),

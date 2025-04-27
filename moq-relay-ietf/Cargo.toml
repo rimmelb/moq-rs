@@ -15,7 +15,6 @@ categories = ["multimedia", "network-programming", "web-programming"]
 moq-transport = { path = "../moq-transport", version = "0.10" }
 moq-native-ietf = { path = "../moq-native-ietf", version = "0.5" }
 moq-api = { path = "../moq-api", version = "0.2" }
-moq-shared = { path = "../moq-shared" }
 
 # QUIC
 url = "2"
