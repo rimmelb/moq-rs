@@ -75,7 +75,7 @@ async fn main() -> anyhow::Result<()> {
         match connect_to_other_session(cli.clone(), url.clone(), reader.clone()).await {
             Ok(new_url) => {
                 url = new_url;
-                if let Some(port) = get_port(&url.to_string()) {
+                if let Some(port) = get_port(&url.as_ref()) {
                     cli.bind.set_port(port);
                 }
                 break;
