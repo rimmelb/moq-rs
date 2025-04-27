@@ -29,7 +29,7 @@ async fn main() -> anyhow::Result<()> {
         match connect_to_other_session(config.clone(), url.clone(), tracks.clone()).await {
             Ok(new_url) => {
                 url = new_url;
-                if let Some(port) = get_port(&url.as_ref()) {
+                if let Some(port) = get_port(url.as_ref()) {
                     config.bind.set_port(port);
                 }
                 break;
