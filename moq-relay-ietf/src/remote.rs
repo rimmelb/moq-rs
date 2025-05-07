@@ -12,6 +12,7 @@ use futures::StreamExt;
 use moq_native_ietf::quic;
 use moq_transport::coding::Tuple;
 use moq_transport::serve::{Track, TrackReader, TrackWriter};
+use moq_transport::session::SharedState;
 use moq_transport::watch::State;
 use url::Url;
 
@@ -214,8 +215,9 @@ impl RemoteProducer {
         let session = self.quic.connect(&self.url).await?;
         let (session, subscriber) = moq_transport::session::Subscriber::connect(session).await?;
 
+        let shared_state = SharedState::new();
         // Run the session
-        let mut session = session.run().boxed();
+        let mut session = session.run(shared_state).boxed();
         let mut tasks = FuturesUnordered::new();
 
         let mut done = None;

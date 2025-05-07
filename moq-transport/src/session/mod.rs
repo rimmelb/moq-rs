@@ -3,16 +3,19 @@ mod announced;
 mod error;
 mod publisher;
 mod reader;
+mod shared;
 mod subscribe;
 mod subscribed;
 mod subscriber;
 mod track_status_requested;
 mod writer;
 
+use crate::error::SessionError as OfficialError;
 pub use announce::*;
 pub use announced::*;
 pub use error::*;
 pub use publisher::*;
+pub use shared::SharedState;
 pub use subscribe::*;
 pub use subscribed::*;
 pub use subscriber::*;
@@ -22,6 +25,8 @@ use reader::*;
 use writer::*;
 
 use futures::{stream::FuturesUnordered, StreamExt};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 use crate::message::Message;
 use crate::watch::Queue;
@@ -30,14 +35,11 @@ use crate::{message, setup};
 #[must_use = "run() must be called"]
 pub struct Session {
     webtransport: web_transport::Session,
-
-    sender: Writer,
+    sender: Arc<Mutex<Writer>>,
     recver: Reader,
-
     publisher: Option<Publisher>,
     subscriber: Option<Subscriber>,
-
-    outgoing: Queue<Message>,
+    pub outgoing: Queue<Message>,
 }
 
 impl Session {
@@ -46,7 +48,7 @@ impl Session {
         sender: Writer,
         recver: Reader,
         role: setup::Role,
-    ) -> (Self, Option<Publisher>, Option<Subscriber>) {
+    ) -> (Session, Option<Publisher>, Option<Subscriber>) {
         let outgoing = Queue::default().split();
         let publisher = role
             .is_publisher()
@@ -55,7 +57,7 @@ impl Session {
 
         let session = Self {
             webtransport,
-            sender,
+            sender: Arc::new(Mutex::new(sender)),
             recver,
             publisher: publisher.clone(),
             subscriber: subscriber.clone(),
@@ -95,25 +97,21 @@ impl Session {
         let server: setup::Server = recver.decode().await?;
         log::debug!("received server SETUP: {:?}", server);
 
-        // Downgrade our role based on the server's role.
         let role = match server.role {
             setup::Role::Both => role,
             setup::Role::Publisher => match role {
-                // Both sides are publishers only
                 setup::Role::Publisher => {
                     return Err(SessionError::RoleIncompatible(server.role, role))
                 }
                 _ => setup::Role::Subscriber,
             },
             setup::Role::Subscriber => match role {
-                // Both sides are subscribers only
                 setup::Role::Subscriber => {
                     return Err(SessionError::RoleIncompatible(server.role, role))
                 }
                 _ => setup::Role::Publisher,
             },
         };
-
         Ok(Session::new(session, sender, recver, role))
     }
 
@@ -141,18 +139,15 @@ impl Session {
             ));
         }
 
-        // Downgrade our role based on the client's role.
         let role = match client.role {
             setup::Role::Both => role,
             setup::Role::Publisher => match role {
-                // Both sides are publishers only
                 setup::Role::Publisher => {
                     return Err(SessionError::RoleIncompatible(client.role, role))
                 }
                 _ => setup::Role::Subscriber,
             },
             setup::Role::Subscriber => match role {
-                // Both sides are subscribers only
                 setup::Role::Subscriber => {
                     return Err(SessionError::RoleIncompatible(client.role, role))
                 }
@@ -168,32 +163,71 @@ impl Session {
 
         log::debug!("sending server SETUP: {:?}", server);
         sender.encode(&server).await?;
-
         Ok(Session::new(session, sender, recver, role))
     }
 
-    pub async fn run(self) -> Result<(), SessionError> {
+    pub async fn run(self, shared_state: SharedState) -> Result<(), SessionError> {
+        let sender = self.sender.clone();
+        let shared_state = shared_state.clone();
+        let sender_2 = sender.clone();
+
+        let run_goaway = Self::execute_goaway(sender_2, shared_state);
+
         tokio::select! {
-            res = Self::run_recv(self.recver, self.publisher, self.subscriber.clone()) => res,
-            res = Self::run_send(self.sender, self.outgoing) => res,
-            res = Self::run_streams(self.webtransport.clone(), self.subscriber.clone()) => res,
-            res = Self::run_datagrams(self.webtransport, self.subscriber) => res,
+        res = Self::run_recv(self.recver, self.publisher, self.subscriber.clone()) => res,
+        res = Self::run_send(self.sender, self.outgoing) => res,
+        res = Self::run_streams(self.webtransport.clone(), self.subscriber.clone()) => res,
+        res = Self::run_datagrams(self.webtransport, self.subscriber) => res,
+        res = run_goaway => res,
         }
     }
 
+    async fn execute_goaway(
+        sender: Arc<Mutex<Writer>>,
+        shared_state: SharedState,
+    ) -> Result<(), SessionError> {
+        let shared_state_clone = shared_state.clone();
+        Self::goaway_message_send(sender, shared_state.clone()).await?;
+        Self::raise_goaway_timeout_error(shared_state_clone).await
+    }
+
+    pub async fn raise_goaway_timeout_error(shared_state: SharedState) -> Result<(), SessionError> {
+        tokio::time::sleep(std::time::Duration::from_secs(
+            shared_state.get_value().unwrap_or(10),
+        ))
+        .await;
+        Err(SessionError::GoawayTimeout(OfficialError::GoawayTimeout))
+    }
+
     async fn run_send(
-        mut sender: Writer,
+        sender: Arc<Mutex<Writer>>,
         mut outgoing: Queue<message::Message>,
     ) -> Result<(), SessionError> {
         while let Some(msg) = outgoing.pop().await {
             log::debug!("sending message: {:?}", msg);
+            let mut sender = sender.lock().await;
             sender.encode(&msg).await?;
         }
-
         Ok(())
     }
 
-    async fn run_recv(
+    async fn goaway_message_send(
+        sender: Arc<Mutex<Writer>>,
+        shared_state: SharedState,
+    ) -> Result<(), SessionError> {
+        tokio::select! {
+            _ = shared_state.wait_for_change() => {
+                let msg = message::Message::GoAway(message::GoAway {
+                url: shared_state.get_url().unwrap().to_string(),
+                });
+                let mut sender = sender.lock().await;
+                sender.encode(&msg).await?;
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn run_recv(
         mut recver: Reader,
         mut publisher: Option<Publisher>,
         mut subscriber: Option<Subscriber>,
@@ -224,7 +258,22 @@ impl Session {
                 Err(msg) => msg,
             };
 
-            // TODO GOAWAY
+            let msg = match TryInto::<message::Relay>::try_into(msg) {
+                Ok(msg) => {
+                    if let Some(ref mut pub_) = publisher {
+                        if let Err(e) = pub_.recv_goaway(msg.clone()).await {
+                            log::warn!("Publisher GoAway Error: {:?}", e);
+                        }
+                    }
+                    if let Some(ref mut sub_) = subscriber {
+                        if let Err(e) = sub_.recv_goaway(msg.clone()).await {
+                            log::warn!("ubscriber GoAway Error {:?}", e);
+                        }
+                    }
+                    continue;
+                }
+                Err(msg) => msg,
+            };
             unimplemented!("unknown message context: {:?}", msg)
         }
     }
@@ -247,7 +296,7 @@ impl Session {
                         };
                     });
                 },
-                _ = tasks.next(), if !tasks.is_empty() => {},
+                _ = tasks.next(), if !tasks.is_empty() => {} ,
             };
         }
     }

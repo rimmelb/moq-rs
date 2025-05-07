@@ -1,5 +1,5 @@
 use futures::{stream::FuturesUnordered, FutureExt, StreamExt};
-use moq_transport::session::{Announced, Publisher, Subscriber};
+use moq_transport::session::{Announced, Publisher, SharedState, Subscriber};
 
 use crate::Listings;
 
@@ -20,7 +20,9 @@ impl Session {
             moq_transport::session::Session::accept(session).await?;
 
         let mut tasks = FuturesUnordered::new();
-        tasks.push(async move { session.run().await.map_err(Into::into) }.boxed());
+        let shared_state = SharedState::new();
+
+        tasks.push(async move { session.run(shared_state).await.map_err(Into::into) }.boxed());
 
         if let Some(remote) = publisher {
             tasks.push(Self::serve_subscriber(self.clone(), remote).boxed());

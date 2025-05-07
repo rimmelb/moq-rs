@@ -4,6 +4,7 @@ use moq_transport::{
     serve::Tracks,
     session::{Announced, SessionError, Subscriber},
 };
+use std::sync::Arc;
 
 use crate::{Api, Locals, Producer};
 
@@ -56,7 +57,7 @@ impl Consumer {
     async fn serve(mut self, mut announce: Announced) -> Result<(), anyhow::Error> {
         let mut tasks = FuturesUnordered::new();
 
-        let (_, mut request, reader) = Tracks::new(announce.namespace.clone()).produce();
+        let (_, mut request, reader) = Arc::new(Tracks::new(announce.namespace.clone())).produce();
 
         if let Some(api) = self.api.as_ref() {
             let mut refresh = api.set_origin(reader.namespace.to_utf8_path()).await?;

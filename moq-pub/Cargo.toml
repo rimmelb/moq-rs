@@ -17,7 +17,6 @@ categories = ["multimedia", "network-programming", "web-programming"]
 moq-native-ietf = { path = "../moq-native-ietf", version = "0.5" }
 moq-transport = { path = "../moq-transport", version = "0.10" }
 moq-catalog = { path = "../moq-catalog", version = "0.2" }
-
 url = "2"
 bytes = "1"
 

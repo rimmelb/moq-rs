@@ -18,6 +18,7 @@ pub use remote::*;
 pub use session::*;
 pub use web::*;
 
+use moq_transport::session::SharedState;
 use std::net;
 use url::Url;
 
@@ -69,14 +70,21 @@ async fn main() -> anyhow::Result<()> {
         anyhow::bail!("missing TLS certificates");
     }
 
+    let shared_state = SharedState::new();
+    let relay_stopping_state = SharedState::new();
+
     // Create a QUIC server for media.
-    let relay = Relay::new(RelayConfig {
-        tls: tls.clone(),
-        bind: cli.bind,
-        node: cli.node,
-        api: cli.api,
-        announce: cli.announce,
-    })?;
+    let relay = Relay::new(
+        RelayConfig {
+            tls: tls.clone(),
+            bind: cli.bind,
+            node: cli.node,
+            api: cli.api,
+            announce: cli.announce,
+        },
+        shared_state.clone(),
+        relay_stopping_state.clone(),
+    )?;
 
     if cli.dev {
         // Create a web server too.
@@ -84,8 +92,9 @@ async fn main() -> anyhow::Result<()> {
         let web = Web::new(WebConfig {
             bind: cli.bind,
             tls,
+            shared_state: shared_state.clone(),
+            relay_stopping_state: relay_stopping_state.clone(),
         });
-
         tokio::spawn(async move {
             web.run().await.expect("failed to run web server");
         });

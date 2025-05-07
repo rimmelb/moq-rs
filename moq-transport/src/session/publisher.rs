@@ -26,8 +26,8 @@ pub struct Publisher {
     announces: Arc<Mutex<HashMap<Tuple, AnnounceRecv>>>,
     subscribed: Arc<Mutex<HashMap<u64, SubscribedRecv>>>,
     unknown: Queue<Subscribed>,
-
     outgoing: Queue<Message>,
+    url: Arc<Mutex<String>>,
 }
 
 impl Publisher {
@@ -38,6 +38,7 @@ impl Publisher {
             subscribed: Default::default(),
             unknown: Default::default(),
             outgoing,
+            url: Arc::new(Mutex::new(String::new())),
         }
     }
 
@@ -111,6 +112,7 @@ impl Publisher {
                         None => status_done = true,
                     }
                 },
+
                 Some(res) = subscribe_tasks.next() => res,
                 Some(res) = status_tasks.next() => res,
                 else => return Ok(())
@@ -195,11 +197,35 @@ impl Publisher {
         Ok(())
     }
 
+    pub async fn recv_goaway(&mut self, msg: message::Relay) -> Result<(), SessionError> {
+        log::info!("Megkapja-e ezt?: {:?}", msg);
+        let res = match msg {
+            message::Relay::GoAway(msg) => self.recv_goaway_message(msg).await,
+        };
+        if let Err(err) = res {
+            log::warn!("failed to process message: {}", err);
+        }
+        Ok(())
+    }
+
+    pub async fn get_url(&self) -> String {
+        let url = self.url.lock().unwrap();
+        url.clone()
+    }
+
+    pub async fn recv_goaway_message(&mut self, msg: message::GoAway) -> Result<(), SessionError> {
+        let mut url = self.url.lock().unwrap();
+        *url = msg.url.clone();
+        if msg.url.is_empty() {
+            return Err(SessionError::Serve(ServeError::NotFound));
+        }
+        Ok(())
+    }
+
     fn recv_announce_ok(&mut self, msg: message::AnnounceOk) -> Result<(), SessionError> {
         if let Some(announce) = self.announces.lock().unwrap().get_mut(&msg.namespace) {
             announce.recv_ok()?;
         }
-
         Ok(())
     }
 
@@ -284,11 +310,10 @@ impl Publisher {
         if let Some(subscribed) = self.subscribed.lock().unwrap().get_mut(&msg.id) {
             subscribed.recv_unsubscribe()?;
         }
-
         Ok(())
     }
 
-    pub(super) fn send_message<T: Into<message::Publisher> + Into<Message>>(&mut self, msg: T) {
+    pub fn send_message<T: Into<message::Publisher> + Into<Message>>(&mut self, msg: T) {
         let msg = msg.into();
         match &msg {
             message::Publisher::SubscribeDone(msg) => self.drop_subscribe(msg.id),
@@ -296,7 +321,6 @@ impl Publisher {
             message::Publisher::Unannounce(msg) => self.drop_announce(&msg.namespace),
             _ => (),
         };
-
         self.outgoing.push(msg.into()).ok();
     }
 

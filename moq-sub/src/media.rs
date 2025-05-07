@@ -22,8 +22,12 @@ pub struct Media<O> {
 }
 
 impl<O: AsyncWrite + Send + Unpin + 'static> Media<O> {
-    pub async fn new(subscriber: Subscriber, tracks: Tracks, output: O) -> anyhow::Result<Self> {
-        let (tracks_writer, _tracks_request, tracks_reader) = tracks.produce();
+    pub async fn new(
+        subscriber: Subscriber,
+        tracks: Arc<Tracks>,
+        output: O,
+    ) -> anyhow::Result<Self> {
+        let (tracks_writer, _tracks_request, tracks_reader) = Arc::clone(&tracks).produce();
         let broadcast = tracks_reader; // breadcrumb for navigating API name changes
         Ok(Self {
             subscriber,
