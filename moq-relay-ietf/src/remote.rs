@@ -12,9 +12,9 @@ use futures::StreamExt;
 use moq_native_ietf::quic;
 use moq_transport::coding::Tuple;
 use moq_transport::serve::{Track, TrackReader, TrackWriter};
+use moq_transport::session::SharedState;
 use moq_transport::watch::State;
 use url::Url;
-use moq_transport::session::SharedState;
 
 use crate::Api;
 

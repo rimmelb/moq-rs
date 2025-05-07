@@ -1,8 +1,8 @@
 // session.rs
+use crate::{Consumer, Producer};
 use futures::{stream::FuturesUnordered, FutureExt, StreamExt};
 use moq_transport::session::SessionError;
 use moq_transport::session::SharedState;
-use crate::{Consumer, Producer};
 
 pub struct Session {
     pub session: moq_transport::session::Session,

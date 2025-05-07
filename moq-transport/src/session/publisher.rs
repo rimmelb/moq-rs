@@ -6,7 +6,10 @@ use std::{
 use futures::{stream::FuturesUnordered, StreamExt};
 
 use crate::{
-    coding::Tuple, message::{self, Message}, serve::{ServeError, TracksReader}, setup
+    coding::Tuple,
+    message::{self, Message},
+    serve::{ServeError, TracksReader},
+    setup,
 };
 
 use crate::watch::Queue;
@@ -218,7 +221,6 @@ impl Publisher {
         }
         Ok(())
     }
-
 
     fn recv_announce_ok(&mut self, msg: message::AnnounceOk) -> Result<(), SessionError> {
         if let Some(announce) = self.announces.lock().unwrap().get_mut(&msg.namespace) {

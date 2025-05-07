@@ -21,7 +21,8 @@ pub struct Listings {
 
 impl Listings {
     pub fn new(namespace: String) -> Self {
-        let (writer, _, reader) = Arc::new(Tracks::new(Tuple::from_utf8_path(&namespace))).produce();
+        let (writer, _, reader) =
+            Arc::new(Tracks::new(Tuple::from_utf8_path(&namespace))).produce();
 
         let state = State {
             writer,

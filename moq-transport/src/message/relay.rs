@@ -45,5 +45,5 @@ macro_rules! relay_msgs {
 }
 
 relay_msgs! {
-	GoAway,
+    GoAway,
 }

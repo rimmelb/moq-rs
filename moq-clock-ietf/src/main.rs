@@ -10,7 +10,7 @@ mod clock;
 use moq_transport::{
     coding::Tuple,
     serve,
-    session::{Publisher, Subscriber, SharedState},
+    session::{Publisher, SharedState, Subscriber},
 };
 use std::sync::Arc;
 

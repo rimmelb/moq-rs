@@ -1,9 +1,15 @@
 use std::{
-    collections::{hash_map, HashMap}, io, sync::{atomic, Arc, Mutex}
+    collections::{hash_map, HashMap},
+    io,
+    sync::{atomic, Arc, Mutex},
 };
 
 use crate::{
-    coding::{Decode, Tuple}, data, message::{self, Message}, serve::{self, ServeError}, setup
+    coding::{Decode, Tuple},
+    data,
+    message::{self, Message},
+    serve::{self, ServeError},
+    setup,
 };
 
 use crate::watch::Queue;
@@ -107,18 +113,16 @@ impl Subscriber {
 
     pub async fn recv_goaway_message(&mut self, msg: &message::GoAway) -> Result<(), SessionError> {
         {
-        let mut url = self.url.lock().unwrap();
-        *url = msg.url.clone();
+            let mut url = self.url.lock().unwrap();
+            *url = msg.url.clone();
         }
         Ok(())
     }
-
 
     pub fn get_url(&self) -> String {
         let url = self.url.lock().unwrap();
         url.clone()
     }
-
 
     fn recv_announce(&mut self, msg: &message::Announce) -> Result<(), SessionError> {
         let mut announces = self.announced.lock().unwrap();

@@ -8,8 +8,8 @@ use moq_native_ietf::quic;
 use moq_sub::media::Media;
 use moq_transport::{coding::Tuple, serve::Tracks, session::SharedState};
 
-use tokio::time::sleep;
 use std::sync::Arc;
+use tokio::time::sleep;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env_logger::init();
@@ -23,7 +23,6 @@ async fn main() -> anyhow::Result<()> {
     let mut config = Config::parse();
     let mut url = config.url.clone();
     let tracks = Arc::new(Tracks::new(Tuple::from_utf8_path(&config.name)));
-
 
     loop {
         match connect_to_other_session(config.clone(), url.clone(), tracks.clone()).await {
@@ -41,7 +40,6 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-
     Ok(())
 }
 
@@ -49,7 +47,11 @@ fn get_port(url_str: &str) -> Option<u16> {
     Url::parse(url_str).ok()?.port()
 }
 
-async fn connect_to_other_session(config: Config, mut url: Url, t: Arc<Tracks>) -> anyhow::Result<Url> {
+async fn connect_to_other_session(
+    config: Config,
+    mut url: Url,
+    t: Arc<Tracks>,
+) -> anyhow::Result<Url> {
     loop {
         let out = tokio::io::stdout();
         let tls = config.tls.load()?;
@@ -62,7 +64,6 @@ async fn connect_to_other_session(config: Config, mut url: Url, t: Arc<Tracks>) 
         let (session, subscriber) = moq_transport::session::Subscriber::connect(session)
             .await
             .context("failed to create MoQ Transport session")?;
-
 
         let mut media = Media::new(subscriber.clone(), t.clone(), out).await?;
 
@@ -83,7 +84,7 @@ async fn connect_to_other_session(config: Config, mut url: Url, t: Arc<Tracks>) 
                             log::info!("Switching to new URL: {}", new_url);
                             url = new_url;
                         }
-                    },
+                    }
                     Err(parse_err) => {
                         log::error!(
                             "Failed to parse new URL from subscriber: {}. Keeping current URL: {}",

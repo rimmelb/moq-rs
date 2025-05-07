@@ -1,5 +1,5 @@
-use crate::{coding, serve, setup};
 use crate::error::{self, MoqError};
+use crate::{coding, serve, setup};
 
 #[derive(thiserror::Error, Debug, Clone)]
 pub enum SessionError {

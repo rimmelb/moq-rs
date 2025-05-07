@@ -3,13 +3,14 @@ mod announced;
 mod error;
 mod publisher;
 mod reader;
+mod shared;
 mod subscribe;
 mod subscribed;
 mod subscriber;
 mod track_status_requested;
 mod writer;
-mod shared;
 
+use crate::error::SessionError as OfficialError;
 pub use announce::*;
 pub use announced::*;
 pub use error::*;
@@ -19,7 +20,6 @@ pub use subscribe::*;
 pub use subscribed::*;
 pub use subscriber::*;
 pub use track_status_requested::*;
-use crate::error::SessionError as OfficialError;
 
 use reader::*;
 use writer::*;
@@ -174,23 +174,28 @@ impl Session {
         let run_goaway = Self::execute_goaway(sender_2, shared_state);
 
         tokio::select! {
-            res = Self::run_recv(self.recver, self.publisher, self.subscriber.clone()) => res,
-            res = Self::run_send(self.sender, self.outgoing) => res,
-            res = Self::run_streams(self.webtransport.clone(), self.subscriber.clone()) => res,
-            res = Self::run_datagrams(self.webtransport, self.subscriber) => res,
-            res = run_goaway => res,
-            }
+        res = Self::run_recv(self.recver, self.publisher, self.subscriber.clone()) => res,
+        res = Self::run_send(self.sender, self.outgoing) => res,
+        res = Self::run_streams(self.webtransport.clone(), self.subscriber.clone()) => res,
+        res = Self::run_datagrams(self.webtransport, self.subscriber) => res,
+        res = run_goaway => res,
         }
+    }
 
-    async fn execute_goaway(sender: Arc<Mutex<Writer>>, shared_state: SharedState) -> Result<(), SessionError> {
+    async fn execute_goaway(
+        sender: Arc<Mutex<Writer>>,
+        shared_state: SharedState,
+    ) -> Result<(), SessionError> {
         let shared_state_clone = shared_state.clone();
         Self::goaway_message_send(sender, shared_state.clone()).await?;
         Self::raise_goaway_timeout_error(shared_state_clone).await
     }
 
-
     pub async fn raise_goaway_timeout_error(shared_state: SharedState) -> Result<(), SessionError> {
-        tokio::time::sleep(std::time::Duration::from_secs(shared_state.get_value().unwrap_or(10))).await;
+        tokio::time::sleep(std::time::Duration::from_secs(
+            shared_state.get_value().unwrap_or(10),
+        ))
+        .await;
         Err(SessionError::GoawayTimeout(OfficialError::GoawayTimeout))
     }
 
@@ -262,7 +267,7 @@ impl Session {
                     }
                     if let Some(ref mut sub_) = subscriber {
                         if let Err(e) = sub_.recv_goaway(msg.clone()).await {
-                         log::warn!("ubscriber GoAway Error {:?}", e);
+                            log::warn!("ubscriber GoAway Error {:?}", e);
                         }
                     }
                     continue;

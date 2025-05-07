@@ -4,16 +4,20 @@ use url::Url;
 
 use anyhow::Context;
 use clap::Parser;
+use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex;
-use std::sync::Arc;
-
 
 use tokio::time::sleep;
 
 use moq_native_ietf::quic;
 use moq_pub::Media;
-use moq_transport::{coding::Tuple, serve::{self, TracksReader}, session::Publisher, session::SharedState};
+use moq_transport::{
+    coding::Tuple,
+    serve::{self, TracksReader},
+    session::Publisher,
+    session::SharedState,
+};
 
 #[derive(Parser, Clone)]
 pub struct Cli {
@@ -56,7 +60,8 @@ async fn main() -> anyhow::Result<()> {
 
     let mut cli = Cli::parse();
     let mut url = cli.url.clone();
-    let (writer, _, reader) = Arc::new(serve::Tracks::new(Tuple::from_utf8_path(&cli.name))).produce();
+    let (writer, _, reader) =
+        Arc::new(serve::Tracks::new(Tuple::from_utf8_path(&cli.name))).produce();
     let media = Media::new(writer)?;
 
     let media_connector = Arc::new(Mutex::new(media));
@@ -69,7 +74,6 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     });
-
 
     loop {
         match connect_to_other_session(cli.clone(), url.clone(), reader.clone()).await {
@@ -93,7 +97,6 @@ fn get_port(url_str: &str) -> Option<u16> {
     Url::parse(url_str).ok()?.port()
 }
 
-
 async fn run_media(media: Arc<Mutex<Media>>) -> anyhow::Result<()> {
     let mut input = tokio::io::stdin();
     let mut buf = BytesMut::new();
@@ -103,7 +106,9 @@ async fn run_media(media: Arc<Mutex<Media>>) -> anyhow::Result<()> {
             .await
             .context("failed to read from stdin")?;
         let mut media_guard = media.lock().await;
-        media_guard.parse(&mut buf).context("failed to parse media")?;
+        media_guard
+            .parse(&mut buf)
+            .context("failed to parse media")?;
     }
 }
 
@@ -128,7 +133,10 @@ async fn connect_to_other_session(cli: Cli, mut url: Url, r: TracksReader) -> an
         let (session, mut publisher) = match Publisher::connect(session).await {
             Ok(publisher) => publisher,
             Err(e) => {
-                log::error!("Failed to create MoQ Transport publisher: {}. Retrying...", e);
+                log::error!(
+                    "Failed to create MoQ Transport publisher: {}. Retrying...",
+                    e
+                );
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 continue;
             }
@@ -145,8 +153,7 @@ async fn connect_to_other_session(cli: Cli, mut url: Url, r: TracksReader) -> an
             Ok(_) => return Ok(url),
             Err(e) => {
                 log::error!("Error occurred: {}. Fetching new URL from publisher...", e);
-                url = Url::parse(&publisher.get_url().await)
-                    .context("failed to parse URL")?;
+                url = Url::parse(&publisher.get_url().await).context("failed to parse URL")?;
                 log::info!("New URL obtained: {}", url);
             }
         }

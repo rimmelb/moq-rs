@@ -7,7 +7,7 @@ pub struct SharedState {
     state: Arc<Mutex<bool>>,
     url: Arc<Mutex<Option<Url>>>,
     elapsed_time: Arc<Mutex<Option<u64>>>,
-    notifier: Arc<Notify>,  // Új mező a változás jelzésére
+    notifier: Arc<Notify>, // Új mező a változás jelzésére
 }
 
 impl SharedState {

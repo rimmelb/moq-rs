@@ -4,8 +4,8 @@ use anyhow::Context;
 
 use futures::{stream::FuturesUnordered, FutureExt, StreamExt};
 use moq_native_ietf::quic;
-use url::Url;
 use moq_transport::session::SharedState;
+use url::Url;
 
 use crate::{Api, Consumer, Locals, Producer, Remotes, RemotesConsumer, RemotesProducer, Session};
 
@@ -41,7 +41,11 @@ pub struct Relay {
 
 impl Relay {
     // Create a QUIC endpoint that can be used for both clients and servers.
-    pub fn new(config: RelayConfig, shared_state: SharedState, relay_stopping_state: SharedState) -> anyhow::Result<Self> {
+    pub fn new(
+        config: RelayConfig,
+        shared_state: SharedState,
+        relay_stopping_state: SharedState,
+    ) -> anyhow::Result<Self> {
         let quic = quic::Endpoint::new(quic::Config {
             bind: config.bind,
             tls: config.tls,
@@ -71,7 +75,7 @@ impl Relay {
             locals,
             remotes,
             shared_state,
-            relay_stopping_state
+            relay_stopping_state,
         })
     }
 
@@ -108,7 +112,9 @@ impl Relay {
             };
             let shared_state = self.shared_state.clone();
             let forward = session.producer.clone();
-            tasks.push(async move { session.run(shared_state).await.context("forwarding failed") }.boxed());
+            tasks.push(
+                async move { session.run(shared_state).await.context("forwarding failed") }.boxed(),
+            );
 
             forward
         } else {
