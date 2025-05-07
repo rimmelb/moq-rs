@@ -10,7 +10,7 @@ use moq_transport::session::SharedState;
 #[derive(Deserialize)]
 struct GoawayParams {
     url: String,
-    value: u64,
+    timeout: u64,
 }
 
 pub struct WebConfig {
@@ -64,7 +64,7 @@ impl Web {
                                     response.push_str(&format!("Invalid URL parameter: {}. ", err));
                                 }
                             }
-                            shared_state.update_with_int(params.value);
+                            shared_state.update_with_int(params.timeout);
                             response.push_str("Integer value updated.");
                             response
                         }
