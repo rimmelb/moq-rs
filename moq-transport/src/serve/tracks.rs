@@ -27,13 +27,13 @@ impl Tracks {
         Self { namespace }
     }
 
-    pub fn produce(self) -> (TracksWriter, TracksRequest, TracksReader) {
-        let info = Arc::new(self);
+    pub fn produce(self: Arc<Self>) -> (TracksWriter, TracksRequest, TracksReader) {
+        let info = Arc::clone(&self);
         let state = State::default().split();
         let queue = Queue::default().split();
 
-        let writer = TracksWriter::new(state.0.clone(), info.clone());
-        let request = TracksRequest::new(state.0, queue.0, info.clone());
+        let writer = TracksWriter::new(state.0.clone(), Arc::clone(&info));
+        let request = TracksRequest::new(state.0, queue.0, Arc::clone(&info));
         let reader = TracksReader::new(state.1, queue.1, info);
 
         (writer, request, reader)

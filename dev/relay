@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Change directory to the root of the project
-cd "$(dirname "$0")/.."
+cd "/mnt/c/Users/Rimmel Botond/Documents/bme/hatodikfelev/onlab/moq-rs"
 
 # Generate the self-signed certificate if needed
 ./dev/cert

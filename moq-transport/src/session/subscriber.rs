@@ -1,15 +1,9 @@
 use std::{
-    collections::{hash_map, HashMap},
-    io,
-    sync::{atomic, Arc, Mutex},
+    collections::{hash_map, HashMap}, io, sync::{atomic, Arc, Mutex}
 };
 
 use crate::{
-    coding::{Decode, Tuple},
-    data,
-    message::{self, Message},
-    serve::{self, ServeError},
-    setup,
+    coding::{Decode, Tuple}, data, message::{self, Message}, serve::{self, ServeError}, setup
 };
 
 use crate::watch::Queue;
@@ -24,8 +18,8 @@ pub struct Subscriber {
 
     subscribes: Arc<Mutex<HashMap<u64, SubscribeRecv>>>,
     subscribe_next: Arc<atomic::AtomicU64>,
-
     outgoing: Queue<Message>,
+    url: Arc<Mutex<String>>,
 }
 
 impl Subscriber {
@@ -36,6 +30,7 @@ impl Subscriber {
             subscribes: Default::default(),
             subscribe_next: Default::default(),
             outgoing,
+            url: Arc::new(Mutex::new(String::new())),
         }
     }
 
@@ -73,7 +68,6 @@ impl Subscriber {
             message::Subscriber::AnnounceError(msg) => self.drop_announce(&msg.namespace),
             _ => {}
         }
-
         // TODO report dropped messages?
         let _ = self.outgoing.push(msg.into());
     }
@@ -96,9 +90,35 @@ impl Subscriber {
             log::debug!("failed to process message: {:?} {}", msg, err);
             return Ok(());
         }
-
         res
     }
+
+    //Modification here
+    pub async fn recv_goaway(&mut self, msg: message::Relay) -> Result<(), SessionError> {
+        let res = match &msg {
+            message::Relay::GoAway(msg) => self.recv_goaway_message(msg).await,
+        };
+        if let Err(SessionError::Serve(err)) = res {
+            log::debug!("failed to process message: {:?} {}", msg, err);
+            return Ok(());
+        }
+        Ok(())
+    }
+
+    pub async fn recv_goaway_message(&mut self, msg: &message::GoAway) -> Result<(), SessionError> {
+        {
+        let mut url = self.url.lock().unwrap();
+        *url = msg.url.clone();
+        }
+        Ok(())
+    }
+
+
+    pub fn get_url(&self) -> String {
+        let url = self.url.lock().unwrap();
+        url.clone()
+    }
+
 
     fn recv_announce(&mut self, msg: &message::Announce) -> Result<(), SessionError> {
         let mut announces = self.announced.lock().unwrap();
@@ -121,6 +141,7 @@ impl Subscriber {
 
     fn recv_unannounce(&mut self, msg: &message::Unannounce) -> Result<(), SessionError> {
         if let Some(announce) = self.announced.lock().unwrap().remove(&msg.namespace) {
+            log::info!("received unannounce");
             announce.recv_unannounce()?;
         }
 

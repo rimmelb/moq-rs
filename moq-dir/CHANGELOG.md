@@ -6,6 +6,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.4](https://github.com/rimmelb/moq-rs/compare/moq-dir-v0.3.3...moq-dir-v0.3.4) - 2025-04-27
+
+### Other
+
+- Fix some errors concerning the removal of moq-shared
+- Deleted moq-shared and moved to moq_transport::session
+- GoAway function-nel kiegészített kód
+
 ## [0.3.3](https://github.com/englishm/moq-rs/compare/moq-dir-v0.3.2...moq-dir-v0.3.3) - 2025-02-24
 
 ### Other

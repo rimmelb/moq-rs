@@ -1,4 +1,5 @@
 use crate::{coding, serve, setup};
+use crate::error::{self, MoqError};
 
 #[derive(thiserror::Error, Debug, Clone)]
 pub enum SessionError {
@@ -45,6 +46,9 @@ pub enum SessionError {
 
     #[error("wrong size")]
     WrongSize,
+
+    #[error("GoawayTimeout")]
+    GoawayTimeout(#[from] error::SessionError),
 }
 
 impl SessionError {
@@ -63,6 +67,7 @@ impl SessionError {
             Self::Duplicate => 409,
             Self::Internal => 500,
             Self::WrongSize => 400,
+            Self::GoawayTimeout(err) => err.code(),
             Self::Serve(err) => err.code(),
         }
     }
