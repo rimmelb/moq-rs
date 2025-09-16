@@ -57,7 +57,10 @@ async fn main() -> anyhow::Result<()> {
     let quic = quic::Endpoint::new(quic::Config {
         bind: config.bind,
         tls,
-    })?;
+    },
+    Some(12500 * 1000),
+    Some(100),
+)?;
 
     log::info!("connecting to server: url={}", config.url);
 

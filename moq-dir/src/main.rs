@@ -51,7 +51,11 @@ async fn main() -> anyhow::Result<()> {
     let quic = quic::Endpoint::new(quic::Config {
         bind: cli.bind,
         tls,
-    })?;
+    },
+    Some(12500 * 1000),
+    Some(100),
+    )?;
+
     let mut quic = quic.server.context("missing server certificate")?;
 
     let listings = Listings::new(cli.namespace);

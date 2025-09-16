@@ -1,0 +1,86 @@
+#!/bin/bash
+set -euo pipefail
+
+# Bandwidth monitoring script for MoQ development
+# This script provides enhanced bandwidth monitoring options
+
+echo "=== MoQ Bandwidth Monitoring Setup ==="
+
+# Change directory to the root of the project
+cd "/mnt/c/Users/Rimmel Botond/Documents/bme/hatodikfelev/onlab/moq-rs"
+
+# Generate the self-signed certificate if needed
+./dev/cert
+
+# Configuration
+export RUST_LOG="${RUST_LOG:-info}"
+CERT="${CERT:-dev/localhost.crt}"
+KEY="${KEY:-dev/localhost.key}"
+PORT="${PORT:-4443}"
+BIND="${BIND:-[::]:$PORT}"
+
+# Bandwidth monitoring specific settings
+BANDWIDTH_INTERVAL="${BANDWIDTH_INTERVAL:-10}"  # Default: every 10 seconds
+DETAILED_LOGS="${DETAILED_LOGS:-true}"        # Set to true for detailed bandwidth logs
+
+
+# Enhanced logging for bandwidth monitoring
+if [ "$DETAILED_LOGS" = "true" ]; then
+    export RUST_LOG="moq_transport::util::bandwidth_estimator=trace,moq_transport::util::cross_layer_metrics=debug,moq_transport::util::quic_metrics=debug,moq_transport::session=info,moq_relay_ietf=info,info"
+    echo "Detailed bandwidth and cross-layer logging enabled"
+else
+    export RUST_LOG="info"
+    echo "Standard bandwidth logging enabled"
+fi
+
+# A list of optional args
+ARGS=""
+
+# Rate limiting environment variables
+RELAY_RATE_LIMIT_MBPS=${RELAY_RATE_LIMIT_MBPS:-"100"}
+
+if [ ! -z "$RELAY_RATE_LIMIT_MBPS" ]; then
+    RELAY_RATE_LIMIT_BPS=$(echo "$RELAY_RATE_LIMIT_MBPS * 1000000" | bc -l | cut -d. -f1)
+    ARGS="$ARGS --rate-limit-bps $RELAY_RATE_LIMIT_BPS"
+    echo "📉 Relay rate limit: ${RELAY_RATE_LIMIT_MBPS} Mbps (${RELAY_RATE_LIMIT_BPS} bps)"
+fi
+
+INITIAL_RTT_MS="${INITIAL_RTT_MS:-50}"  # e.g., 50
+
+if [ -n "${INITIAL_RTT_MS}" ]; then
+  ARGS="$ARGS --initial-rtt-ms ${INITIAL_RTT_MS}"
+fi
+
+# Connect to the given URL to get announcements
+if [ -n "${ANNOUNCE-}" ]; then
+	ARGS="$ARGS --announce $ANNOUNCE"
+fi
+
+# Provide our node URL when registering origins.
+if [ -n "${HOST-}" ]; then
+	ARGS="$ARGS --host $HOST"
+fi
+
+# Enable bandwidth monitoring
+ARGS="$ARGS --bandwidth-monitoring $BANDWIDTH_INTERVAL"
+
+echo ""
+echo "Configuration:"
+echo "  - Server: https://localhost:$PORT"
+echo "  - Bandwidth monitoring: every ${BANDWIDTH_INTERVAL}s"
+echo "  - Detailed logs: $DETAILED_LOGS"
+echo ""
+echo "Publish URL: https://quic.video/publish/?server=localhost:$PORT"
+echo ""
+echo "To test bandwidth monitoring:"
+echo "  Terminal 1: ./dev/relay_with_bandwidth"
+echo "  Terminal 2: ./dev/pub_with_bandwidth"
+echo "  Terminal 3: ./dev/sub"
+echo ""
+echo "Environment variables:"
+echo "  BANDWIDTH_INTERVAL=5 ./dev/relay_with_bandwidth  # Monitor every 5 seconds"
+echo "  DETAILED_LOGS=true ./dev/relay_with_bandwidth     # Enable detailed logs"
+echo ""
+
+# Run the relay with bandwidth monitoring
+cargo run --bin moq-relay-ietf -- --bind "$BIND" --tls-cert "$CERT" --tls-key "$KEY" --dev $ARGS -- "$@"

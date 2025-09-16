@@ -1187,6 +1187,7 @@ name = "moq-dir"
 version = "0.3.3"
 dependencies = [
  "anyhow",
+ "axum",
  "bytes",
  "clap",
  "env_logger",
@@ -1194,6 +1195,7 @@ dependencies = [
  "log",
  "moq-native-ietf",
  "moq-transport",
+ "serde",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1227,6 +1229,7 @@ name = "moq-pub"
 version = "0.8.4"
 dependencies = [
  "anyhow",
+ "axum",
  "bytes",
  "clap",
  "env_logger",
@@ -1236,6 +1239,7 @@ dependencies = [
  "moq-transport",
  "mp4",
  "rfc6381-codec",
+ "serde",
  "serde_json",
  "tokio",
  "tracing",

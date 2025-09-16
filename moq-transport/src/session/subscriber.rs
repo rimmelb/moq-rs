@@ -52,6 +52,15 @@ impl Subscriber {
         Ok((session, subscriber.unwrap()))
     }
 
+    pub async fn connect_with_stats(
+        session: web_transport::Session,
+        stats: Option<Arc<dyn super::QuicStatsProvider + Send + Sync>>,
+    ) -> Result<(Session, Self), SessionError> {
+        let (session, _, subscriber) =
+            Session::connect_role_with_stats(session, setup::Role::Subscriber, stats).await?;
+        Ok((session, subscriber.unwrap()))
+    }
+
     pub async fn announced(&mut self) -> Option<Announced> {
         self.announced_queue.pop().await
     }
@@ -62,6 +71,23 @@ impl Subscriber {
         let (send, recv) = Subscribe::new(self.clone(), id, track);
         self.subscribes.lock().unwrap().insert(id, recv);
 
+        send.closed().await
+    }
+
+    // Új API: Subscribe deadline-nel
+    pub async fn subscribe_with_timeout(
+        &mut self,
+        track: serve::TrackWriter,
+        delivery_timeout_ms: u64,
+    ) -> Result<(), ServeError> {
+        let id = self.subscribe_next.fetch_add(1, atomic::Ordering::Relaxed);
+        let (send, recv) = super::subscribe::Subscribe::new_with_timeout(
+            self.clone(),
+            id,
+            track,
+            Some(delivery_timeout_ms),
+        );
+        self.subscribes.lock().unwrap().insert(id, recv);
         send.closed().await
     }
 
@@ -198,6 +224,7 @@ impl Subscriber {
         self.announced.lock().unwrap().remove(namespace);
     }
 
+    #[allow(dead_code)] // Keep for backwards compatibility
     pub(super) async fn recv_stream(
         mut self,
         stream: web_transport::RecvStream,
@@ -214,6 +241,35 @@ impl Subscriber {
             if let Some(subscribe) = self.subscribes.lock().unwrap().remove(&id) {
                 subscribe.error(err.clone())?;
             }
+        }
+
+        res
+    }
+
+    pub(super) async fn recv_stream_with_bandwidth(
+        mut self,
+        stream: web_transport::RecvStream,
+        bandwidth_estimator: std::sync::Arc<tokio::sync::Mutex<crate::util::BandwidthEstimator>>,
+    ) -> Result<(), SessionError> {
+        let mut reader = Reader::with_bandwidth_estimator(stream, bandwidth_estimator);
+        let header: data::Header = reader.decode().await?;
+        let id = header.subscribe_id();
+
+        let res = self.recv_stream_inner(reader, header).await;
+
+        match &res {
+            // NE zárjuk le a teljes Subscribe-ot egyetlen stream Cancel miatt
+            Err(SessionError::Serve(ServeError::Cancel)) => {
+                //log::debug!("stream for subscribe id={} cancelled; keeping subscription open", id);
+                return Ok(());
+            }
+            // Végzetes hiba: ilyenkor lezárjuk a Subscribe-ot
+            Err(SessionError::Serve(err)) => {
+                if let Some(subscribe) = self.subscribes.lock().unwrap().remove(&id) {
+                    subscribe.error(err.clone())?;
+                }
+            }
+            _ => {}
         }
 
         res
@@ -270,14 +326,20 @@ impl Subscriber {
 
             let mut remain = chunk.size;
             while remain > 0 {
-                let chunk = reader
-                    .read_chunk(remain)
-                    .await?
-                    .ok_or(SessionError::WrongSize)?;
-
-                log::trace!("received track payload: {:?}", chunk.len());
-                remain -= chunk.len();
-                object.write(chunk)?;
+                match reader.read_chunk(remain).await? {
+                    Some(bytes) => {
+                        remain -= bytes.len();
+                        object.write(bytes)?;
+                    }
+                    None => {
+                        // Truncate: a peer leállította a streamet (STOP_SENDING) vagy idő előtt EOF
+                        // Kezeljük úgy, mintha az objektumot eldobtuk volna; ne döntsük el a subscription-t.
+                        log::debug!("recv_track: truncated object (g={}, remain={}B), dropping object and continuing",
+                            chunk.group_id, remain);
+                        // következő objektumra lépünk
+                        break;
+                    }
+                }
             }
 
             prev = Some(group);
@@ -290,23 +352,27 @@ impl Subscriber {
         mut group: serve::SubgroupWriter,
         mut reader: Reader,
     ) -> Result<(), SessionError> {
-        log::trace!("received group: {:?}", group.info);
+        log::trace!("received subgroup: {:?}", group.info);
 
         while !reader.done().await? {
-            let object: data::SubgroupObject = reader.decode().await?;
+            let hdr: data::SubgroupObject = reader.decode().await?;
+            let mut object = group.create(hdr.size)?;
 
-            log::trace!("received group object: {:?}", object);
-            let mut remain = object.size;
-            let mut object = group.create(object.size)?;
-
+            let mut remain = hdr.size;
             while remain > 0 {
-                let data = reader
-                    .read_chunk(remain)
-                    .await?
-                    .ok_or(SessionError::WrongSize)?;
-                log::trace!("received group payload: {:?}", data.len());
-                remain -= data.len();
-                object.write(data)?;
+                match reader.read_chunk(remain).await? {
+                    Some(bytes) => {
+                        remain -= bytes.len();
+                        object.write(bytes)?;
+                    }
+                    None => {
+                        log::debug!(
+                            "recv_subgroup: truncated object (g={}, remain={}B), dropping",
+                            group.group_id, remain
+                        );
+                        break;
+                    }
+                }
             }
         }
 

@@ -25,6 +25,15 @@ pub struct RelayConfig {
     /// Our hostname which we advertise to other origins.
     /// We use QUIC, so the certificate must be valid for this address.
     pub node: Option<Url>,
+
+    /// Bandwidth monitoring interval in seconds (None = disabled)
+    pub bandwidth_monitoring: Option<u64>,
+
+    /// Rate limit for outgoing connections (bits per second)
+    pub rate_limit_bps: Option<u32>,
+
+    /// Initial RTT hint in milliseconds for QUIC transport
+    pub rtt_ms: Option<u32>, // <- NEW
 }
 
 pub struct Relay {
@@ -35,11 +44,14 @@ pub struct Relay {
     remotes: Option<(RemotesProducer, RemotesConsumer)>,
     shared_state: SharedState,
     relay_stopping_state: SharedState,
+    bandwidth_monitoring: Option<u64>,
+    rate_limit_bps: Option<u32>, // új mező
 }
 
 //for Goaway -> curl -X POST "https://localhost:4443/goaway?url=https://localhost:4442&timeout=5"
 
 impl Relay {
+    // ITT lehet állítani az RTT értékét
     // Create a QUIC endpoint that can be used for both clients and servers.
     pub fn new(
         config: RelayConfig,
@@ -49,7 +61,10 @@ impl Relay {
         let quic = quic::Endpoint::new(quic::Config {
             bind: config.bind,
             tls: config.tls,
-        })?;
+        },
+        config.rate_limit_bps,
+        config.rtt_ms,
+        )?;
 
         let api = if let (Some(url), Some(node)) = (config.api, config.node) {
             log::info!("using moq-api: url={} node={}", url, node);
@@ -76,6 +91,8 @@ impl Relay {
             remotes,
             shared_state,
             relay_stopping_state,
+            bandwidth_monitoring: config.bandwidth_monitoring,
+            rate_limit_bps: config.rate_limit_bps, // új mező
         })
     }
 
@@ -87,6 +104,7 @@ impl Relay {
             consumer
         });
 
+        // Forward session rate limit alkalmazása (ha van)
         let forward = if let Some(url) = &self.announce {
             log::info!("forwarding announces to {}", url);
             let session = self
@@ -95,20 +113,31 @@ impl Relay {
                 .connect(url)
                 .await
                 .context("failed to establish forward connection")?;
-            let (session, publisher, subscriber) =
-                moq_transport::session::Session::connect(session)
-                    .await
-                    .context("failed to establish forward session")?;
 
-            // Create a normal looking session, except we never forward or register announces.
+            let (mut session, publisher, subscriber) = if let Some(rate) = self.rate_limit_bps {
+                let rate = rate as f64;
+                log::info!("Forward session rate limit: {:.0} bps ({:.2} Mbps)", rate, rate / 1_000_000.0);
+                moq_transport::session::Session::connect_role_with_rate_limit(
+                    session,
+                    moq_transport::setup::Role::Both,
+                    None,
+                    Some(rate)
+                ).await.context("failed to establish forward session with rate limit")?
+            } else {
+                moq_transport::session::Session::connect_role(
+                    session,
+                    moq_transport::setup::Role::Both
+                ).await.context("failed to establish forward session")?
+            };
+
             let session = Session {
                 session,
-                producer: Some(Producer::new(
+                producer: publisher.map(|publisher| Producer::new(
                     publisher,
                     self.locals.clone(),
                     remotes.clone(),
                 )),
-                consumer: Some(Consumer::new(subscriber, self.locals.clone(), None, None)),
+                consumer: subscriber.map(|subscriber| Consumer::new(subscriber, self.locals.clone(), None, None)),
             };
             let shared_state = self.shared_state.clone();
             let forward = session.producer.clone();
@@ -126,26 +155,34 @@ impl Relay {
         let shared_state = self.shared_state.clone();
         let relay_stopping_state = self.relay_stopping_state.clone();
 
+        // Clone néhány értéket a loop előtt
+        let locals = self.locals.clone();
+        let api = self.api.clone();
+        let bandwidth_monitoring = self.bandwidth_monitoring;
+
         loop {
             tokio::select! {
-
                 res = server.accept() => {
                     let conn = res.context("failed to accept QUIC connection")?;
-                    let locals = self.locals.clone();
+                    let rate_limit = self.rate_limit_bps;
+                    let locals = locals.clone();
+                    let api = api.clone();
                     let remotes = remotes.clone();
                     let forward = forward.clone();
-                    let api = self.api.clone();
                     let shared_state = shared_state.clone();
-                    let _relay_stopping_state = relay_stopping_state.clone();
 
                     tasks.push(async move {
-                        let (session, publisher, subscriber) = match moq_transport::session::Session::accept(conn).await {
-                            Ok(session) => session,
-                            Err(err) => {
-                                log::warn!("failed to accept MoQ session: {}", err);
-                                return Ok(());
-                            }
-                        };
+                        let (mut session, publisher, subscriber) = moq_transport::session::Session::accept(conn)
+                            .await
+                            .context("failed to accept MoQ session")?;
+
+                        if let Some(rate) = rate_limit {
+                            // Set fixed send bandwidth in Mbps, then propagate to Publisher
+                            let rate = rate as f64;
+                            session.set_fixed_send_bandwidth_mbps(Some(rate / 1_000_000.0));
+                            session.apply_send_rate_limit_to_publisher();
+                            log::info!("Applied relay rate limit to session: {:.0} bps ({:.2} Mbps)", rate, rate/1_000_000.0);
+                        }
 
                         let session = Session {
                             session,
@@ -153,12 +190,21 @@ impl Relay {
                             consumer: subscriber.map(|subscriber| Consumer::new(subscriber, locals, api, forward)),
                         };
 
+                        // Use bandwidth monitoring if configured
+                         if let Some(interval) = bandwidth_monitoring {
+                            log::info!("Starting session with bandwidth monitoring (interval: {}s)", interval);
+                            let rate_limit = rate_limit.map(|r| r as f64);
+                            let effective_rate = rate_limit.unwrap_or(0.0); // 0.0 = no cap
+                            if let Err(err) = session.run_with_bandwidth_monitoring(shared_state, interval, effective_rate).await {
+                                log::warn!("failed to run MoQ session with bandwidth monitoring: {}", err);
+                            }
+                        } else {
                             if let Err(err) = session.run(shared_state).await {
                                 log::warn!("failed to run MoQ session: {}", err);
                             }
+                        }
 
-
-                        Ok(())
+                        Ok::<(), anyhow::Error>(())
                     }.boxed());
                 },
 

@@ -7,16 +7,19 @@ pub struct SharedState {
     state: Arc<Mutex<bool>>,
     url: Arc<Mutex<Option<Url>>>,
     elapsed_time: Arc<Mutex<Option<u64>>>,
-    notifier: Arc<Notify>, // Új mező a változás jelzésére
+    notifier: Arc<Notify>,
+    // ÚJ: dinamikus küldési limit (bps)
+    rate_limit_bps: Arc<Mutex<Option<u64>>>,
 }
 
 impl SharedState {
     pub fn new() -> Self {
         Self {
-            url: Arc::new(Mutex::new(None)), // Inicializálás
+            url: Arc::new(Mutex::new(None)),
             state: Arc::new(Mutex::new(false)),
             elapsed_time: Arc::new(Mutex::new(None)),
-            notifier: Arc::new(Notify::new()), // Inicializálás
+            notifier: Arc::new(Notify::new()),
+            rate_limit_bps: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -32,6 +35,14 @@ impl SharedState {
         {
             let mut stored_value = self.elapsed_time.lock().unwrap();
             *stored_value = Some(new_value);
+        }
+        self.update();
+    }
+
+    pub fn update_with_rate_limit_bps(&self, bps: u64) {
+        {
+            let mut rl = self.rate_limit_bps.lock().unwrap();
+            *rl = Some(bps);
         }
         self.update();
     }
@@ -57,6 +68,11 @@ impl SharedState {
     pub fn get_value(&self) -> Option<u64> {
         let stored_value = self.elapsed_time.lock().unwrap();
         *stored_value
+    }
+
+    pub fn get_rate_limit_bps(&self) -> Option<u64> {
+        let rl = self.rate_limit_bps.lock().unwrap();
+        *rl
     }
 
     pub async fn wait_for_change(&self) {

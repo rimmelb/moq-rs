@@ -33,7 +33,12 @@ if [ -n "${HOST-}" ]; then
 	ARGS="$ARGS --host $HOST"
 fi
 
+# Enable bandwidth monitoring (default: every 2 seconds)
+BANDWIDTH_INTERVAL="${BANDWIDTH_INTERVAL:-2}"
+ARGS="$ARGS --bandwidth-monitoring $BANDWIDTH_INTERVAL"
+
 echo "Publish URL: https://quic.video/publish/?server=localhost:$PORT"
+echo "Bandwidth monitoring enabled (every ${BANDWIDTH_INTERVAL}s)"
 
 # Run the relay and forward any arguments
 cargo run --bin moq-relay-ietf -- --bind "$BIND" --tls-cert "$CERT" --tls-key "$KEY" --dev $ARGS -- "$@"

@@ -10,12 +10,19 @@ use axum::{
 use hyper_serve::tls_rustls::RustlsAcceptor;
 use moq_transport::session::SharedState;
 use serde::Deserialize;
+use axum::routing::post;
 use tower_http::cors::{Any, CorsLayer};
 
 #[derive(Deserialize)]
 struct GoawayParams {
     url: String,
     timeout: u64,
+}
+
+#[derive(Deserialize)]
+struct RateLimitParams {
+    bps: Option<u64>,
+    mbps: Option<f64>,
 }
 
 pub struct WebConfig {
@@ -48,16 +55,16 @@ impl Web {
 
         // Clone the shared state for use in the `/update` handler.
         let shared_state = config.shared_state.clone();
-        let relay_stopping_state = config.relay_stopping_state.clone();
+        let _relay_stopping_state = config.relay_stopping_state.clone(); // silence unused for now
 
         let app = Router::new()
             .route("/fingerprint", get(serve_fingerprint))
             .route(
                 "/goaway",
                 axum::routing::post({
+                    let shared_state = shared_state.clone();
                     move |Query(params): Query<GoawayParams>| {
                         let shared_state = shared_state.clone();
-                        let _relay_stopping_state = relay_stopping_state.clone();
                         async move {
                             let mut response = String::new();
                             match url::Url::parse(&params.url) {
@@ -72,6 +79,27 @@ impl Web {
                             shared_state.update_with_int(params.timeout);
                             response.push_str("Integer value updated.");
                             response
+                        }
+                    }
+                }),
+            )
+            // ÚJ: dinamikus rate limit
+            .route(
+                "/rate_limit",
+                post({
+                    let shared_state = shared_state.clone();
+                    move |Query(params): Query<RateLimitParams>| {
+                        let shared_state = shared_state.clone();
+                        async move {
+                            let bps = if let Some(b) = params.bps {
+                                b
+                            } else if let Some(m) = params.mbps {
+                                (m * 1_000_000.0) as u64
+                            } else {
+                                return "Missing 'bps' or 'mbps'".into_response();
+                            };
+                            shared_state.update_with_rate_limit_bps(bps);
+                            format!("Rate limit updated: {} bps ({:.2} Mbps)", bps, (bps as f64)/1_000_000.0).into_response()
                         }
                     }
                 }),

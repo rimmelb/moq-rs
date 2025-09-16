@@ -43,20 +43,27 @@ pub struct Subscribe {
 
 impl Subscribe {
     pub(super) fn new(
+        subscriber: Subscriber,
+        id: u64,
+        track: TrackWriter,
+    ) -> (Subscribe, SubscribeRecv) {
+        Self::new_with_timeout(subscriber, id, track, None)
+    }
+
+    pub(super) fn new_with_timeout(
         mut subscriber: Subscriber,
         id: u64,
         track: TrackWriter,
+        delivery_timeout_ms: Option<u64>,
     ) -> (Subscribe, SubscribeRecv) {
         subscriber.send_message(message::Subscribe {
             id,
             track_alias: id,
             track_namespace: track.namespace.clone(),
             track_name: track.name.clone(),
-            // TODO add prioritization logic on the publisher side
-            subscriber_priority: 127, // default to mid value, see: https://github.com/moq-wg/moq-transport/issues/504
-            group_order: GroupOrder::Publisher, // defer to publisher send order
+            subscriber_priority: 127, // default mid
+            group_order: GroupOrder::Publisher,
             filter_type: FilterType::LatestGroup,
-            // TODO add these to the publisher.
             start: Some(SubscribePair {
                 group: SubscribeLocation::Latest(0),
                 object: SubscribeLocation::Absolute(0),
@@ -66,8 +73,17 @@ impl Subscribe {
                 object: SubscribeLocation::None,
             }),
             params: Default::default(),
+            delivery_timeout_ms,
         });
+        let (send, recv) = Subscribe::split_handles(subscriber, id, track);
+        (send, recv)
+    }
 
+    fn split_handles(
+        subscriber: Subscriber,
+        id: u64,
+        track: TrackWriter,
+    ) -> (Subscribe, SubscribeRecv) {
         let info = SubscribeInfo {
             namespace: track.namespace.clone(),
             name: track.name.clone(),

@@ -15,7 +15,6 @@ use moq_pub::Media;
 use moq_transport::{
     coding::Tuple,
     serve::{self, TracksReader},
-    session::Publisher,
     session::SharedState,
 };
 
@@ -43,6 +42,18 @@ pub struct Cli {
     #[arg(long)]
     pub name: String,
 
+    /// Enable bandwidth monitoring and logging
+    #[arg(long)]
+    pub bandwidth_monitoring: bool,
+
+    /// Rate limit for sending (bits per second). E.g., 1000000 for 1 Mbps
+    #[arg(long)]
+    pub rate_limit_bps: Option<u32>,
+
+    /// Initial RTT hint in milliseconds for QUIC transport
+    #[arg(long, value_name="MS")]
+    pub initial_rtt_ms: Option<u32>,
+
     /// The TLS configuration.
     #[command(flatten)]
     pub tls: moq_native_ietf::tls::Args,
@@ -62,8 +73,9 @@ async fn main() -> anyhow::Result<()> {
     let mut url = cli.url.clone();
     let (writer, _, reader) =
         Arc::new(serve::Tracks::new(Tuple::from_utf8_path(&cli.name))).produce();
-    let media = Media::new(writer)?;
 
+    // Create media ONCE with the TracksWriter
+    let media = Media::new(writer)?;
     let media_connector = Arc::new(Mutex::new(media));
 
     tokio::spawn({
@@ -76,6 +88,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     loop {
+        // Pass TracksReader to announce, not trying to create from Publisher
         match connect_to_other_session(cli.clone(), url.clone(), reader.clone()).await {
             Ok(new_url) => {
                 url = new_url;
@@ -85,11 +98,12 @@ async fn main() -> anyhow::Result<()> {
                 break;
             }
             Err(e) => {
-                log::error!("Error occurred: {}. Retrying...", e);
+                log::error!("Connection failed: {}. Retrying in 5 seconds...", e);
                 sleep(std::time::Duration::from_secs(5)).await;
             }
         }
     }
+
     Ok(())
 }
 
@@ -112,49 +126,68 @@ async fn run_media(media: Arc<Mutex<Media>>) -> anyhow::Result<()> {
     }
 }
 
+//ITT LEHET ÁLLÍTANI A RTT-ÉRTÉKET
+
 async fn connect_to_other_session(cli: Cli, mut url: Url, r: TracksReader) -> anyhow::Result<Url> {
     loop {
         let tls = cli.tls.load()?;
         let quic = quic::Endpoint::new(moq_native_ietf::quic::Config {
             bind: cli.bind,
             tls: tls.clone(),
-        })?;
+        },
+        cli.rate_limit_bps,
+        cli.initial_rtt_ms,
+        )?;
 
         log::info!("Connecting to relay: url={}", url);
-        let session = match quic.client.connect(&url).await {
-            Ok(session) => session,
+
+        let (wt_session, provider) = match quic.client.connect_with_stats(&url).await {
+            Ok(x) => x,
             Err(e) => {
-                log::error!("Failed to connect to relay: {}. Retrying...", e);
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                log::error!("Connection failed: {}. Retrying...", e);
+                sleep(std::time::Duration::from_secs(5)).await;
                 continue;
             }
         };
 
-        let (session, mut publisher) = match Publisher::connect(session).await {
-            Ok(publisher) => publisher,
-            Err(e) => {
-                log::error!(
-                    "Failed to create MoQ Transport publisher: {}. Retrying...",
-                    e
-                );
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                continue;
-            }
+        let provider: Option<Arc<dyn moq_transport::session::QuicStatsProvider + Send + Sync>> =
+            provider.map(|p| p as Arc<_>);
+
+        // Create session and publisher with rate limiting support
+        let (session, mut publisher) = if cli.rate_limit_bps.is_some() || provider.is_some() {
+            moq_transport::session::Publisher::connect_with_stats_and_rate_limit(
+                wt_session,
+                provider,
+                cli.rate_limit_bps.map(|r| r as f64),
+            ).await.context("failed to create MoQ Transport session with stats and rate limit")?
+        } else {
+            moq_transport::session::Publisher::connect(wt_session)
+                .await.context("failed to create MoQ Transport session")?
         };
+
+        if let Some(rate) = cli.rate_limit_bps {
+            let rate = rate as f64;
+            log::info!("Rate limiting enabled: {:.0} bps ({:.2} Mbps)", rate, rate / 1_000_000.0);
+        }
 
         let shared_state = SharedState::new();
 
+        // Use the TracksReader to announce tracks (media is created once in main)
         let result = tokio::select! {
             res = session.run(shared_state) => res.context("session error"),
-            res = publisher.announce(r.clone()) => res.context("publisher error"),
+            res = publisher.announce(r.clone()) => res.context("failed to serve tracks"),
         };
 
         match result {
-            Ok(_) => return Ok(url),
-            Err(e) => {
-                log::error!("Error occurred: {}. Fetching new URL from publisher...", e);
-                url = Url::parse(&publisher.get_url().await).context("failed to parse URL")?;
+            Ok(_) => {
+                let url_str = publisher.get_url().await;
+                url = Url::parse(&url_str).context("failed to parse URL")?;
                 log::info!("New URL obtained: {}", url);
+                return Ok(url);
+            }
+            Err(e) => {
+                log::error!("Error occurred: {}. Retrying...", e);
+                sleep(std::time::Duration::from_secs(5)).await;
             }
         }
     }

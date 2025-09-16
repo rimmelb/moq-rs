@@ -4,12 +4,15 @@ use std::{
 };
 
 use futures::{stream::FuturesUnordered, StreamExt};
+use tokio::sync::Mutex as TokioMutex;
+use super::writer::RateLimiter;
 
 use crate::{
     coding::Tuple,
     message::{self, Message},
     serve::{ServeError, TracksReader},
     setup,
+    util::BandwidthEstimator,
 };
 
 use crate::watch::Queue;
@@ -22,15 +25,24 @@ use super::{
 #[derive(Clone)]
 pub struct Publisher {
     webtransport: web_transport::Session,
-
     announces: Arc<Mutex<HashMap<Tuple, AnnounceRecv>>>,
     subscribed: Arc<Mutex<HashMap<u64, SubscribedRecv>>>,
     unknown: Queue<Subscribed>,
     outgoing: Queue<Message>,
     url: Arc<Mutex<String>>,
+
+    // Bandwidth estimators for outgoing data streams
+    pub send_bandwidth_estimator: Option<Arc<TokioMutex<BandwidthEstimator>>>,
+
+    // Rate limit for all outgoing streams
+    pub rate_limit_bps: Option<f64>,
+
+    // ÚJ: megosztott limiter
+    pub rate_limiter: Option<Arc<TokioMutex<RateLimiter>>>,
 }
 
 impl Publisher {
+    #[allow(dead_code)] // Keep for backwards compatibility
     pub(crate) fn new(outgoing: Queue<Message>, webtransport: web_transport::Session) -> Self {
         Self {
             webtransport,
@@ -39,7 +51,42 @@ impl Publisher {
             unknown: Default::default(),
             outgoing,
             url: Arc::new(Mutex::new(String::new())),
+            send_bandwidth_estimator: None,
+            rate_limit_bps: None,
+            rate_limiter: None,
         }
+    }
+
+    pub(crate) fn with_bandwidth_and_rate_limit(
+        outgoing: Queue<Message>,
+        webtransport: web_transport::Session,
+        send_bandwidth_estimator: Arc<TokioMutex<BandwidthEstimator>>,
+        rate_limit_bps: Option<f64>,
+        rate_limiter: Option<Arc<TokioMutex<RateLimiter>>>,
+    ) -> Self {
+        if let Some(rate) = rate_limit_bps {
+            log::info!("Publisher created with rate limit: {:.0} bps ({:.2} Mbps)", rate, rate / 1_000_000.0);
+        }
+        Self {
+            webtransport,
+            announces: Default::default(),
+            subscribed: Default::default(),
+            unknown: Default::default(),
+            outgoing,
+            url: Arc::new(Mutex::new(String::new())),
+            send_bandwidth_estimator: Some(send_bandwidth_estimator),
+            rate_limit_bps,
+            rate_limiter,
+        }
+    }
+
+    pub fn get_rate_limit_bps(&self) -> Option<f64> {
+        self.rate_limit_bps
+    }
+
+    // ÚJ: add át a limiter példányt a Writer-eknek
+    pub fn get_rate_limiter(&self) -> Option<Arc<TokioMutex<RateLimiter>>> {
+        self.rate_limiter.clone()
     }
 
     pub async fn accept(
@@ -54,6 +101,22 @@ impl Publisher {
     ) -> Result<(Session, Publisher), SessionError> {
         let (session, publisher, _) =
             Session::connect_role(session, setup::Role::Publisher).await?;
+        Ok((session, publisher.unwrap()))
+    }
+
+    pub async fn connect_with_stats_and_rate_limit(
+        session: web_transport::Session,
+        stats: Option<Arc<dyn super::QuicStatsProvider + Send + Sync>>,
+        rate_limit_bps: Option<f64>,
+
+    ) -> Result<(Session, Self), SessionError> {
+        let (session, publisher, _) =
+            Session::connect_role_with_rate_limit(
+                session,
+                setup::Role::Publisher,
+                stats,
+                rate_limit_bps,
+            ).await?;
         Ok((session, publisher.unwrap()))
     }
 
@@ -124,7 +187,7 @@ impl Publisher {
         subscribe: Subscribed,
         mut tracks: TracksReader,
     ) -> Result<(), SessionError> {
-        if let Some(track) = tracks.subscribe(&subscribe.name) {
+        if let Some(track) = tracks.subscribe(&subscribe.info.name) {
             subscribe.serve(track).await?;
         } else {
             subscribe.close(ServeError::NotFound)?;
@@ -337,6 +400,19 @@ impl Publisher {
     }
 
     pub(super) async fn send_datagram(&mut self, data: bytes::Bytes) -> Result<(), SessionError> {
+        // Rate limit enforcement a datagramokra is
+        if let Some(ref limiter) = self.rate_limiter {
+            let mut l = limiter.lock().await;
+            l.acquire(data.len()).await;
+        }
+
+        // Bandwidth accounting
+        if let Some(ref bandwidth_estimator) = self.send_bandwidth_estimator {
+            let mut estimator = bandwidth_estimator.lock().await;
+            estimator.record_bytes(data.len() as u64);
+            let _ = estimator.update();
+        }
+
         Ok(self.webtransport.send_datagram(data).await?)
     }
 }

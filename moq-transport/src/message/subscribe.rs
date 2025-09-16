@@ -28,6 +28,10 @@ pub struct Subscribe {
 
     /// Optional parameters
     pub params: Params,
+
+    /// Delivery timeout in milliseconds (for deadline-aware scheduling)
+    /// If None, uses relay default SLA
+    pub delivery_timeout_ms: Option<u64>,
 }
 
 impl Decode for Subscribe {
@@ -82,6 +86,13 @@ impl Decode for Subscribe {
 
         let params = Params::decode(r)?;
 
+        // Decode optional delivery timeout (if present in params or remaining data)
+        let delivery_timeout_ms = if r.remaining() >= 8 {
+            Some(u64::decode(r)?)
+        } else {
+            None
+        };
+
         Ok(Self {
             id,
             track_alias,
@@ -93,6 +104,7 @@ impl Decode for Subscribe {
             start,
             end,
             params,
+            delivery_timeout_ms,
         })
     }
 }
@@ -105,9 +117,7 @@ impl Encode for Subscribe {
         self.track_name.encode(w)?;
 
         self.subscriber_priority.encode(w)?;
-
         self.group_order.encode(w)?;
-
         self.filter_type.encode(w)?;
 
         if self.filter_type == FilterType::AbsoluteStart
@@ -125,6 +135,11 @@ impl Encode for Subscribe {
         }
 
         self.params.encode(w)?;
+
+        // Encode delivery_timeout_ms, ha meg van adva (kompatibilis a mi decoderünkkel)
+        if let Some(timeout) = self.delivery_timeout_ms {
+            timeout.encode(w)?;
+        }
 
         Ok(())
     }

@@ -1,0 +1,70 @@
+#!/bin/bash
+set -euo pipefail
+
+# Change directory to the root of the project
+cd "/mnt/c/Users/Rimmel Botond/Documents/bme/hatodikfelev/onlab/moq-rs"
+
+# Download the Big Buck Bunny video if it doesn't exist
+#if [ ! -f dev/bbb.fmp4 ]; then
+#	if [ ! -f dev/bbb.mp4 ]; then
+#		echo "Downloading ya boye Big Buck Bunny..."
+#		wget http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4 -O dev/bbb.mp4
+#	fi
+
+	echo "Converting to a (properly) fragmented MP4..."
+	ffmpeg -i dev/bbb_fix.mp4 \
+		-c copy \
+		-f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer+frag_every_frame \
+		dev/bbb_fix.fmp4
+#fi
+
+# Use debug logging by default
+export RUST_LOG="${RUST_LOG:-debug}"
+
+# Connect to localhost by default.
+HOST="${HOST:-localhost}"
+PORT="${PORT:-4443}"
+ADDR="${ADDR:-$HOST:$PORT}"
+SCHEME="${SCHEME:-https}"
+
+# Use the name "bbb" for the broadcast.
+NAME="${NAME:-bbb}"
+
+# Combine the host into a URL.
+URL="${URL:-"$SCHEME://$ADDR"}"
+
+# Default to a source video
+INPUT="${INPUT:-dev/bbb_fix.fmp4}"
+
+# Print out the watch URL
+echo "Watch URL: https://quic.video/watch/$NAME?server=$ADDR"
+
+PUB_RATE_LIMIT_MBPS=${PUB_RATE_LIMIT_MBPS:-"100"}
+
+# HELYES KONVERZIÓ: használj bc-t a floating point számításhoz
+if command -v bc >/dev/null 2>&1; then
+    PUB_RATE_LIMIT_BPS=$(echo "$PUB_RATE_LIMIT_MBPS * 1000000" | bc | cut -d. -f1)
+else
+    # Alternatív megoldás awk-kal
+    PUB_RATE_LIMIT_BPS=$(awk "BEGIN {printf \"%.0f\", $PUB_RATE_LIMIT_MBPS * 1000000}")
+fi
+
+echo "Rate limit set to: $PUB_RATE_LIMIT_MBPS Mbps ($PUB_RATE_LIMIT_BPS bps)"
+
+
+INITIAL_RTT_MS="${INITIAL_RTT_MS:-50}"  # e.g., 50
+
+EXTRA_ARGS=()
+if [ -n "${INITIAL_RTT_MS}" ]; then
+  EXTRA_ARGS+=(--initial-rtt-ms "${INITIAL_RTT_MS}")
+fi
+
+
+
+# Run ffmpeg and pipe the output to moq-pub with bandwidth monitoring
+ffmpeg -hide_banner -v quiet \
+	-stream_loop -1 -re \
+	-i "$INPUT" \
+	-c copy \
+	-f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer+frag_every_frame \
+	- | cargo run --bin moq-pub -- --bandwidth-monitoring --rate-limit-bps "$PUB_RATE_LIMIT_BPS" --name "$NAME" "$URL" "${EXTRA_ARGS[@]}" "$@"

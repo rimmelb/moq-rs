@@ -152,19 +152,13 @@ impl TracksReader {
         }
 
         let mut state = state.into_mut()?;
-        let track = Track {
-            namespace: self.namespace.clone(),
-            name: name.to_owned(),
-        }
-        .produce();
+        let track = Track { namespace: self.namespace.clone(), name: name.to_owned() }.produce();
 
         if self.queue.push(track.0).is_err() {
+            log::warn!("TracksReader::subscribe({}): request queue closed (TracksRequest dropped)", name);
             return None;
         }
-
-        // We requested the track sucessfully so we can deduplicate it.
         state.tracks.insert(name.to_owned(), track.1.clone());
-
         Some(track.1.clone())
     }
 }

@@ -51,6 +51,18 @@ pub struct Cli {
     /// This hosts a HTTPS web server via TCP to serve the fingerprint of the certificate.
     #[arg(long)]
     pub dev: bool,
+
+    /// Enable bandwidth monitoring with reporting interval in seconds
+    #[arg(long)]
+    pub bandwidth_monitoring: Option<u64>,
+
+    /// Set a global rate limit in bits per second
+    #[arg(long)]
+    pub rate_limit_bps: Option<u32>,
+
+    /// Initial RTT hint in milliseconds for QUIC transport
+    #[arg(long, value_name="MS")]
+    pub initial_rtt_ms: Option<u32>,
 }
 
 #[tokio::main]
@@ -81,10 +93,18 @@ async fn main() -> anyhow::Result<()> {
             node: cli.node,
             api: cli.api,
             announce: cli.announce,
+            bandwidth_monitoring: cli.bandwidth_monitoring,
+            rate_limit_bps: cli.rate_limit_bps,
+            rtt_ms: cli.initial_rtt_ms,
         },
         shared_state.clone(),
         relay_stopping_state.clone(),
     )?;
+
+    if let Some(rate) = cli.rate_limit_bps {
+        let rate = rate as f64;
+        log::info!("Global rate limit enabled: {:.0} bps ({:.2} Mbps)", rate, rate / 1_000_000.0);
+    }
 
     if cli.dev {
         // Create a web server too.

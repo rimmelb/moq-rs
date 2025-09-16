@@ -11,7 +11,9 @@ use futures::FutureExt;
 use futures::StreamExt;
 use moq_native_ietf::quic;
 use moq_transport::coding::Tuple;
-use moq_transport::serve::{Track, TrackReader, TrackWriter};
+use moq_transport::serve::{
+    Track, TrackReader, TrackWriter, Tracks, TracksReader, TracksRequest, TracksWriter,
+};
 use moq_transport::session::SharedState;
 use moq_transport::watch::State;
 use url::Url;
@@ -192,11 +194,14 @@ impl Remote {
 
         (producer, consumer)
     }
+
+    // Nincs per-Remote Tracks broadcast; minden subscribe egy Track-et kap.
 }
 
 #[derive(Default)]
 struct RemoteState {
     tracks: HashMap<(Tuple, String), RemoteTrackWeak>,
+    // TrackWriter-eket kérünk a producer felé
     requested: VecDeque<TrackWriter>,
 }
 
@@ -310,6 +315,7 @@ impl RemoteConsumer {
             None => return Ok(None),
         };
 
+        // Hozz létre egy önálló Track-et a kért (namespace, name) párra
         let (writer, reader) = Track::new(namespace, name).produce();
         let reader = RemoteTrackReader::new(reader, self.state.clone());
 
@@ -339,7 +345,7 @@ impl RemoteTrackReader {
     fn new(reader: TrackReader, parent: State<RemoteState>) -> Self {
         let drop = Arc::new(RemoteTrackDrop {
             parent,
-            key: (reader.namespace.clone(), reader.name.clone()),
+            key: (reader.info.namespace.clone(), reader.info.name.clone()),
         });
 
         Self { reader, drop }
