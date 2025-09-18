@@ -32,13 +32,16 @@ pub struct Publisher {
     url: Arc<Mutex<String>>,
 
     // Bandwidth estimators for outgoing data streams
-    pub send_bandwidth_estimator: Option<Arc<TokioMutex<BandwidthEstimator>>>,
+    pub send_bandwidth_estimator: Arc<TokioMutex<BandwidthEstimator>>,
 
     // Rate limit for all outgoing streams
     pub rate_limit_bps: Option<f64>,
 
     // ÚJ: megosztott limiter
     pub rate_limiter: Option<Arc<TokioMutex<RateLimiter>>>,
+
+    // ÚJ: deadline ütemező konfiguráció
+    deadline_scheduler: Arc<TokioMutex<Option<crate::session::DeadlineSchedulerConfig>>>,
 }
 
 impl Publisher {
@@ -51,9 +54,10 @@ impl Publisher {
             unknown: Default::default(),
             outgoing,
             url: Arc::new(Mutex::new(String::new())),
-            send_bandwidth_estimator: None,
+            send_bandwidth_estimator: Arc::new(TokioMutex::new(BandwidthEstimator::with_cross_layer())),
             rate_limit_bps: None,
             rate_limiter: None,
+            deadline_scheduler: Arc::new(TokioMutex::new(None)),
         }
     }
 
@@ -63,6 +67,7 @@ impl Publisher {
         send_bandwidth_estimator: Arc<TokioMutex<BandwidthEstimator>>,
         rate_limit_bps: Option<f64>,
         rate_limiter: Option<Arc<TokioMutex<RateLimiter>>>,
+        deadline_scheduler: Arc<TokioMutex<Option<crate::session::DeadlineSchedulerConfig>>>,
     ) -> Self {
         if let Some(rate) = rate_limit_bps {
             log::info!("Publisher created with rate limit: {:.0} bps ({:.2} Mbps)", rate, rate / 1_000_000.0);
@@ -74,19 +79,21 @@ impl Publisher {
             unknown: Default::default(),
             outgoing,
             url: Arc::new(Mutex::new(String::new())),
-            send_bandwidth_estimator: Some(send_bandwidth_estimator),
+            send_bandwidth_estimator,
             rate_limit_bps,
             rate_limiter,
+            deadline_scheduler,
         }
     }
 
-    pub fn get_rate_limit_bps(&self) -> Option<f64> {
-        self.rate_limit_bps
+    pub fn get_deadline_scheduler(&self) -> Arc<TokioMutex<Option<crate::session::DeadlineSchedulerConfig>>> {
+        self.deadline_scheduler.clone()
     }
-
-    // ÚJ: add át a limiter példányt a Writer-eknek
     pub fn get_rate_limiter(&self) -> Option<Arc<TokioMutex<RateLimiter>>> {
         self.rate_limiter.clone()
+    }
+    pub fn get_rate_limit_bps(&self) -> Option<f64> {
+        self.rate_limit_bps
     }
 
     pub async fn accept(
@@ -313,6 +320,7 @@ impl Publisher {
     fn recv_subscribe(&mut self, msg: message::Subscribe) -> Result<(), SessionError> {
         let namespace = msg.track_namespace.clone();
 
+        log::info!("{:?} ms", msg.delivery_timeout_ms);
         let subscribe = {
             let mut subscribes = self.subscribed.lock().unwrap();
 
@@ -407,8 +415,8 @@ impl Publisher {
         }
 
         // Bandwidth accounting
-        if let Some(ref bandwidth_estimator) = self.send_bandwidth_estimator {
-            let mut estimator = bandwidth_estimator.lock().await;
+        {
+            let mut estimator = self.send_bandwidth_estimator.lock().await;
             estimator.record_bytes(data.len() as u64);
             let _ = estimator.update();
         }

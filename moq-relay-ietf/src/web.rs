@@ -25,6 +25,14 @@ struct RateLimitParams {
     mbps: Option<f64>,
 }
 
+#[derive(Deserialize)]
+struct DeadlineParams {
+    enable: Option<bool>,
+    mode: Option<String>,     // "edf" | "lstf"
+    guard_ms: Option<u64>,    // default pl. 10
+    beta: Option<f64>,        // default pl. 0.9
+}
+
 pub struct WebConfig {
     pub bind: net::SocketAddr,
     pub tls: moq_native_ietf::tls::Config,
@@ -100,6 +108,31 @@ impl Web {
                             };
                             shared_state.update_with_rate_limit_bps(bps);
                             format!("Rate limit updated: {} bps ({:.2} Mbps)", bps, (bps as f64)/1_000_000.0).into_response()
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/deadline_scheduler",
+                post({
+                    let shared_state = config.shared_state.clone();
+                    move |Query(params): Query<DeadlineParams>| {
+                        let shared_state = shared_state.clone();
+                        async move {
+                            let enabled = params.enable.unwrap_or(true);
+                            let mode = match params.mode.as_deref() {
+                                Some("edf") => moq_transport::session::DeadlineMode::Edf,
+                                _ => moq_transport::session::DeadlineMode::Lstf,
+                            };
+                            let cfg = moq_transport::session::DeadlineSchedulerConfig {
+                                enabled,
+                                mode,
+                                guard_ms: params.guard_ms.unwrap_or(10),
+                                beta: params.beta.unwrap_or(0.9),
+                            };
+                            shared_state.update_deadline_scheduler(cfg.clone());
+                            format!("Deadline scheduler: enabled={} mode={:?} guard={}ms beta={:.2}",
+                                enabled, mode, cfg.guard_ms, cfg.beta).into_response()
                         }
                     }
                 }),

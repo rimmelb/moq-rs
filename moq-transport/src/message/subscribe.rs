@@ -34,66 +34,31 @@ pub struct Subscribe {
     pub delivery_timeout_ms: Option<u64>,
 }
 
+const PARAM_DELIVERY_TIMEOUT: u64 = 100;
+
 impl Decode for Subscribe {
     fn decode<R: bytes::Buf>(r: &mut R) -> Result<Self, DecodeError> {
         let id = u64::decode(r)?;
         let track_alias = u64::decode(r)?;
         let track_namespace = Tuple::decode(r)?;
         let track_name = String::decode(r)?;
-
         let subscriber_priority = u8::decode(r)?;
         let group_order = GroupOrder::decode(r)?;
-
         let filter_type = FilterType::decode(r)?;
 
-        let start: Option<SubscribePair>;
-        let end: Option<SubscribePair>;
-        match filter_type {
-            FilterType::AbsoluteStart => {
-                if r.remaining() < 2 {
-                    return Err(DecodeError::MissingField);
-                }
-                start = Some(SubscribePair::decode(r)?);
-                end = None;
-            }
-            FilterType::AbsoluteRange => {
-                if r.remaining() < 4 {
-                    return Err(DecodeError::MissingField);
-                }
-                start = Some(SubscribePair::decode(r)?);
-                end = Some(SubscribePair::decode(r)?);
-            }
-            _ => {
-                start = None;
-                end = None;
-            }
-        }
-
-        if let Some(s) = &start {
-            // You can't have a start object without a start group.
-            if s.group == SubscribeLocation::None && s.object != SubscribeLocation::None {
-                return Err(DecodeError::InvalidSubscribeLocation);
-            }
-        }
-        if let Some(e) = &end {
-            // You can't have an end object without an end group.
-            if e.group == SubscribeLocation::None && e.object != SubscribeLocation::None {
-                return Err(DecodeError::InvalidSubscribeLocation);
-            }
-        }
-
-        // NOTE: There's some more location restrictions in the draft, but they're enforced at a higher level.
-
-        let params = Params::decode(r)?;
-
-        // Decode optional delivery timeout (if present in params or remaining data)
-        let delivery_timeout_ms = if r.remaining() >= 8 {
-            Some(u64::decode(r)?)
-        } else {
-            None
+        let (start, end) = match filter_type {
+            FilterType::AbsoluteStart => (Some(SubscribePair::decode(r)?), None),
+            FilterType::AbsoluteRange => (
+                Some(SubscribePair::decode(r)?),
+                Some(SubscribePair::decode(r)?),
+            ),
+            _ => (None, None),
         };
 
-        Ok(Self {
+        let mut params = Params::decode(r)?;
+        let delivery_timeout_ms = params.get::<u64>(PARAM_DELIVERY_TIMEOUT)?;
+
+        let msg = Self {
             id,
             track_alias,
             track_namespace,
@@ -105,7 +70,15 @@ impl Decode for Subscribe {
             end,
             params,
             delivery_timeout_ms,
-        })
+        };
+
+        log::info!(
+            "decoded Subscribe id={} timeout={:?} filter={:?}",
+            msg.id,
+            msg.delivery_timeout_ms,
+            msg.filter_type
+        );
+        Ok(msg)
     }
 }
 
@@ -115,32 +88,33 @@ impl Encode for Subscribe {
         self.track_alias.encode(w)?;
         self.track_namespace.encode(w)?;
         self.track_name.encode(w)?;
-
         self.subscriber_priority.encode(w)?;
         self.group_order.encode(w)?;
         self.filter_type.encode(w)?;
 
-        if self.filter_type == FilterType::AbsoluteStart
-            || self.filter_type == FilterType::AbsoluteRange
-        {
-            if self.start.is_none() || self.end.is_none() {
-                return Err(EncodeError::MissingField);
-            }
-            if let Some(start) = &self.start {
+        match self.filter_type {
+            FilterType::AbsoluteStart => {
+                let start = self.start.as_ref().ok_or(EncodeError::MissingField)?;
                 start.encode(w)?;
             }
-            if let Some(end) = &self.end {
+            FilterType::AbsoluteRange => {
+                let start = self.start.as_ref().ok_or(EncodeError::MissingField)?;
+                let end = self.end.as_ref().ok_or(EncodeError::MissingField)?;
+                start.encode(w)?;
                 end.encode(w)?;
+            }
+            _ => {
+                // LatestGroup / más: ne írjunk start/end-et függetlenül attól, hogy az Option véletlenül Some
             }
         }
 
-        self.params.encode(w)?;
-
-        // Encode delivery_timeout_ms, ha meg van adva (kompatibilis a mi decoderünkkel)
         if let Some(timeout) = self.delivery_timeout_ms {
-            timeout.encode(w)?;
+            let mut p = self.params.clone();
+            p.set(PARAM_DELIVERY_TIMEOUT, timeout)?;
+            p.encode(w)?;
+        } else {
+            self.params.encode(w)?;
         }
-
         Ok(())
     }
 }

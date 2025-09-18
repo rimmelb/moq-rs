@@ -97,7 +97,7 @@ impl Consumer {
                         let info = track.clone();
                         log::info!("forwarding subscribe: {:?}", info);
 
-                        if let Err(err) = remote.subscribe(track).await {
+                        if let Err(err) = remote.subscribe_with_timeout(track, 200).await {
                             log::warn!("failed forwarding subscribe: {:?}, error: {}", info, err)
                         }
 

@@ -40,6 +40,20 @@ pub trait QuicStatsProvider: Send + Sync {
     fn get_stats(&self) -> BoxFuture<'_, Option<(std::time::Duration, u64, u64, u64, u64)>>;
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum DeadlineMode {
+    Edf,
+    Lstf,
+}
+
+#[derive(Clone, Debug)]
+pub struct DeadlineSchedulerConfig {
+    pub enabled: bool,
+    pub mode: DeadlineMode,
+    pub guard_ms: u64,   // γ (biztonsági margó) ms
+    pub beta: f64,       // β (pps scaling), pl. 0.9
+}
+
 #[must_use = "run() must be called"]
 pub struct Session {
     webtransport: web_transport::Session,
@@ -62,7 +76,9 @@ pub struct Session {
     // Send rate limit in bits per second (opcionális)
     send_rate_limit_bps: Option<f64>,
     // ÚJ: megosztott limiter (Publisher és Writer-ek részére)
-    send_rate_limiter: Option<Arc<TokioMutex<RateLimiter>>>,
+    pub send_rate_limiter: Option<Arc<TokioMutex<RateLimiter>>>,
+    // ÚJ: deadline ütemező konfiguráció handle-je
+    pub deadline_scheduler: Arc<TokioMutex<Option<DeadlineSchedulerConfig>>>,
 }
 
 impl Session {
@@ -86,6 +102,9 @@ impl Session {
         // FONTOS: a kontrollcsatorna Writer-e is kapja meg a limiter-t
         sender.set_rate_limiter(rate_limiter.clone());
 
+        // ÚJ: deadline scheduler config közös handle
+        let deadline_scheduler = Arc::new(TokioMutex::new(None));
+
         let publisher = match role {
             setup::Role::Publisher | setup::Role::Both => {
                 Some(Publisher::with_bandwidth_and_rate_limit(
@@ -94,6 +113,8 @@ impl Session {
                     send_estimator.clone(),
                     rate_limit_bps,
                     rate_limiter.clone(),
+                    // átadjuk a deadline handle-t is
+                    deadline_scheduler.clone(),
                 ))
             }
             _ => None,
@@ -116,6 +137,7 @@ impl Session {
             quic_stats_provider: None,
             send_rate_limit_bps: rate_limit_bps,
             send_rate_limiter: rate_limiter,
+            deadline_scheduler, // ÚJ
         };
 
         (session, publisher, subscriber)
@@ -385,59 +407,37 @@ impl Session {
         let shared_state_clone = shared_state.clone();
         let mut this = self;
 
+        // CLONES PER TASK
         let recv_bw_estimator = this.recv_bandwidth_estimator.clone();
         let send_bw_estimator = this.send_bandwidth_estimator.clone();
         let send_rate_limiter = this.send_rate_limiter.clone();
-
-        // CLONES PER TASK
         let send_bw_estimator_for_watcher = send_bw_estimator.clone();
         let recv_bw_estimator_for_monitor = recv_bw_estimator.clone();
         let send_bw_estimator_for_monitor = send_bw_estimator.clone();
+        let deadline_cfg_handle = this.deadline_scheduler.clone();
 
         let rate_limit_watcher = async move {
             loop {
                 shared_state_clone.wait_for_change().await;
+
+                // 1) din. rate limit
                 if let Some(bps) = shared_state_clone.get_rate_limit_bps() {
                     if let Some(ref limiter) = send_rate_limiter {
                         let mut guard = limiter.lock().await;
                         guard.set_bps(bps as u64);
                         guard.drain();
                     }
-                    {
-                        let mut est = send_bw_estimator_for_watcher.lock().await;
-                        est.reset();
-                    }
+                    let mut est = send_bw_estimator_for_watcher.lock().await;
+                    est.reset();
                     log::info!("Dynamic rate limit updated to: {} bps ({:.2} Mbps)", bps, (bps as f64)/1_000_000.0);
                 }
-            }
-        };
 
-        let bandwidth_monitor = async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
-            log::debug!("Session bandwidth monitoring started");
-            loop {
-                interval.tick().await;
-
-                {
-                    let mut est = recv_bw_estimator_for_monitor.lock().await;
-                    let _ = est.force_update();
-                }
-                {
-                    let mut est = send_bw_estimator_for_monitor.lock().await;
-                    let _ = est.force_update();
-                }
-
-                let recv_bw = {
-                    let est = recv_bw_estimator_for_monitor.lock().await;
-                    est.bandwidth_mbps()
-                };
-                let send_bw = {
-                    let est = send_bw_estimator_for_monitor.lock().await;
-                    est.bandwidth_mbps()
-                };
-
-                if recv_bw > 0.0 || send_bw > 0.0 {
-                    log::info!("Session Bandwidth - Recv: {:.2} Mbps, Send: {:.2} Mbps", recv_bw, send_bw);
+                // 2) deadline scheduler config
+                if let Some(cfg) = shared_state_clone.get_deadline_scheduler() {
+                    let mut h = deadline_cfg_handle.lock().await;
+                    *h = Some(cfg.clone());
+                    log::info!("Deadline scheduler updated: enabled={} mode={:?} guard={}ms beta={:.2}",
+                        cfg.enabled, cfg.mode, cfg.guard_ms, cfg.beta);
                 }
             }
         };
@@ -448,7 +448,6 @@ impl Session {
             res = Self::run_streams(this.webtransport.clone(), this.subscriber.clone(), this.recv_bandwidth_estimator.clone()) => res,
             res = Self::run_datagrams(this.webtransport, this.subscriber) => res,
             _ = rate_limit_watcher => Ok(()),
-            // _ = bandwidth_monitor => Ok(()),
         }
     }
 

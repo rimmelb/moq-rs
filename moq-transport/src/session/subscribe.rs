@@ -61,17 +61,11 @@ impl Subscribe {
             track_alias: id,
             track_namespace: track.namespace.clone(),
             track_name: track.name.clone(),
-            subscriber_priority: 127, // default mid
+            subscriber_priority: 127,
             group_order: GroupOrder::Publisher,
             filter_type: FilterType::LatestGroup,
-            start: Some(SubscribePair {
-                group: SubscribeLocation::Latest(0),
-                object: SubscribeLocation::Absolute(0),
-            }),
-            end: Some(SubscribePair {
-                group: SubscribeLocation::None,
-                object: SubscribeLocation::None,
-            }),
+            start: None, // FIX
+            end: None,   // FIX
             params: Default::default(),
             delivery_timeout_ms,
         });

@@ -109,7 +109,6 @@ macro_rules! message_types {
 				let _len = u64::decode(r)?;
 
 				// TODO: Check the length of the message.
-
 				match t {
 					$($val => {
 						let msg = $name::decode(r)?;

@@ -10,16 +10,20 @@ pub struct SharedState {
     notifier: Arc<Notify>,
     // ÚJ: dinamikus küldési limit (bps)
     rate_limit_bps: Arc<Mutex<Option<u64>>>,
+    // ÚJ: deadline ütemező konfiguráció
+    deadline_cfg: Arc<Mutex<Option<crate::session::DeadlineSchedulerConfig>>>,
+
 }
 
 impl SharedState {
     pub fn new() -> Self {
         Self {
-            url: Arc::new(Mutex::new(None)),
             state: Arc::new(Mutex::new(false)),
+            url: Arc::new(Mutex::new(None)),
             elapsed_time: Arc::new(Mutex::new(None)),
             notifier: Arc::new(Notify::new()),
             rate_limit_bps: Arc::new(Mutex::new(None)),
+            deadline_cfg: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -43,6 +47,14 @@ impl SharedState {
         {
             let mut rl = self.rate_limit_bps.lock().unwrap();
             *rl = Some(bps);
+        }
+        self.update();
+    }
+
+    pub fn update_deadline_scheduler(&self, cfg: crate::session::DeadlineSchedulerConfig) {
+        {
+            let mut g = self.deadline_cfg.lock().unwrap();
+            *g = Some(cfg);
         }
         self.update();
     }
@@ -73,6 +85,11 @@ impl SharedState {
     pub fn get_rate_limit_bps(&self) -> Option<u64> {
         let rl = self.rate_limit_bps.lock().unwrap();
         *rl
+    }
+
+    pub fn get_deadline_scheduler(&self) -> Option<crate::session::DeadlineSchedulerConfig> {
+        let g = self.deadline_cfg.lock().unwrap();
+        g.clone()
     }
 
     pub async fn wait_for_change(&self) {
