@@ -235,12 +235,11 @@ impl Subscribed {
 
         let header_msg: data::Header = header.into();
         writer.encode(&header_msg).await?;
-        log::trace!("sent subgroup header: {:?}", header_msg);
 
-        // Ha nincs deadline, marad a jelenlegi viselkedés
+        // Ha nincs deadline scheduler, marad az eredeti soros küldés (melegítés/védelem maradhat)
         let cfg_opt = publisher.get_deadline_scheduler().lock().await.clone();
         let Some(cfg) = cfg_opt.filter(|c| c.enabled) else {
-            // fallback: eredeti soros küldés (plusz meglévő drop logika)
+            // Ha nincs / túl kicsi sávszél, fallback
             const MIN_START_BPS: f64 = 200_000.0;       // 200 kbps alatt “ismeretlen”
             const DEFAULT_START_BPS: f64 = 5_000_000.0; // 5 Mbps induló becslés
 
@@ -322,114 +321,53 @@ impl Subscribed {
             return Ok(());
         };
 
-        // Deadline-aware ütemező (EDF/LSTF) – per-subgroup min-heap
-        // Debug derive elhagyva: a Reader nem Debug
-        struct Item {
-            deadline: std::time::Instant,
-            slack: f64,
-            pkt: u64,
-            object: serve::SubgroupObjectReader,
-        }
-        impl PartialEq for Item { fn eq(&self, other: &Self) -> bool { self.slack.eq(&other.slack) } }
-        impl Eq for Item {}
-        impl PartialOrd for Item { fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) } }
-        impl Ord for Item {
-            fn cmp(&self, other: &Self) -> Ordering {
-                // BinaryHeap max-heap -> invert for min
-                match (self.slack.partial_cmp(&other.slack), self.deadline.cmp(&other.deadline)) {
-                    (Some(Ordering::Less), _) => Ordering::Greater,
-                    (Some(Ordering::Greater), _) => Ordering::Less,
-                    _ => other.deadline.cmp(&self.deadline),
-                }
-            }
-        }
-
-        let mss: u32 = 1200;
+        // Egyszerű: minden objektum előtt számold a slack-et és állítsd a stream priority-t.
         let guard = std::time::Duration::from_millis(cfg.guard_ms);
-        let mut q_pkts: u64 = 0;
         let now0 = std::time::Instant::now();
+        let mss: u32 = 1200;
 
-        // Kis ablakban gyűjtünk, majd küldünk; ismétlés amíg van object
-        loop {
-            // 1) gyűjtés egy kicsi ablakban (2ms), hogy legyen választék
-            let mut heap: BinaryHeap<Item> = BinaryHeap::new();
-            let pps = Self::effective_pps(&publisher, mss, cfg.beta).await.unwrap_or(1.0);
-            let rtt = {
-                let est = publisher.send_bandwidth_estimator.lock().await;
-                est.cross_layer_metrics().map(|m| m.rtt_current).unwrap_or_else(|| std::time::Duration::from_millis(50))
-            };
+        while let Some(mut object) = subgroup.next().await? {
+            let is_init = subgroup.group_id == 0 && object.object_id == 0;
 
-            let collect_deadline = std::time::Instant::now() + std::time::Duration::from_millis(2);
-            while std::time::Instant::now() < collect_deadline {
-                match tokio::time::timeout(std::time::Duration::from_millis(1), subgroup.next()).await {
-                    Ok(Ok(Some(object))) => {
-                        // Admission: számoljuk a finish időt
-                        let pkt_num = ((object.size as u64 + mss as u64 - 1) / mss as u64).max(1);
-                        let now = std::time::Instant::now();
-                        let deadline = if let Some(to_ms) = delivery_timeout_ms {
-                            now0 + std::time::Duration::from_millis(to_ms)
-                        } else {
-                            now + std::time::Duration::from_secs(3600) // kvázi végtelen
-                        };
-                        let t_finish = now + rtt/2 + std::time::Duration::from_secs_f64(((q_pkts + pkt_num) as f64)/pps) + guard;
-
-                        if t_finish <= deadline {
-                            let slack = (deadline - (now + rtt/2)).as_secs_f64() - ((q_pkts + pkt_num) as f64)/pps - guard.as_secs_f64();
-                            let key_slack = match cfg.mode {
-                                crate::session::DeadlineMode::Edf => (deadline - now).as_secs_f64(),
-                                crate::session::DeadlineMode::Lstf => slack,
-                            };
-                            heap.push(Item { deadline, slack: key_slack, pkt: pkt_num, object });
-                            q_pkts += pkt_num;
-                        } else {
-                            // azonnali drop
-                            log::debug!("⏱️ drop (admission): cannot meet deadline (g={}, size={}B)", subgroup.group_id, object.size);
-                            let mut o = object;
-                            while let Some(_chunk) = o.read().await? {}
-                        }
-                    }
-                    Ok(Ok(None)) => break, // subgroup vége
-                    Ok(Err(e)) => return Err(e.into()),
-                    Err(_) => break, // timeout
-                }
-            }
-
-            // 2) küldés a heap tetejéről, amíg van (peek_closed nem létezik -> egyszerűsítve)
-
-            while let Some(mut item) = heap.pop() {
-                // header + payload küldése
-                let hdr = data::SubgroupObject {
-                    object_id: item.object.object_id,
-                    size: item.object.size,
-                    status: item.object.status,
+            // Admission/drop – init soha ne essen ki
+            if let Some(to_ms) = delivery_timeout_ms {
+                // pps (cross-layer): min(app_bps, cwnd/RTT) → LSTF
+                let pps = Self::effective_pps(&publisher, mss, cfg.beta).await.unwrap_or(1.0);
+                let rtt = {
+                    let est = publisher.send_bandwidth_estimator.lock().await;
+                    est.cross_layer_metrics()
+                        .map(|m| m.rtt_current)
+                        .unwrap_or_else(|| std::time::Duration::from_millis(50))
                 };
-                writer.encode(&hdr).await?;
-                state.lock_mut().ok_or(ServeError::Done)?.update_max_group_id(subgroup.group_id, item.object.object_id)?;
+                let pkt_num = ((object.size as u64 + mss as u64 - 1) / mss as u64).max(1);
+                let now = std::time::Instant::now();
+                let deadline = now0 + std::time::Duration::from_millis(to_ms);
+                let t_finish = now + rtt / 2 + std::time::Duration::from_secs_f64((pkt_num as f64) / pps) + guard;
 
-                while let Some(chunk) = item.object.read().await? {
-                    writer.write(&chunk).await?;
+                if !is_init && t_finish > deadline {
+                    log::debug!(
+                        "⏱️ drop (admission): cannot meet deadline (g={}, o={}, size={}B)",
+                        subgroup.group_id, object.object_id, object.size
+                    );
+                    while let Some(_chunk) = object.read().await? {}
+                    continue;
                 }
-                // elküldve: q csökkentése
-                q_pkts = q_pkts.saturating_sub(item.pkt);
+
+                // Slack → priority (0 = legmagasabb)
+                let slack_ms = (deadline - (now + rtt / 2)).as_secs_f64() - (pkt_num as f64) / pps - guard.as_secs_f64();
+                let prio = Self::priority_from_slack_ms(slack_ms);
+                writer.stream.set_priority(prio);
+            } else if is_init {
+                writer.stream.set_priority(0);
             }
 
-            // ha a subgroup véget ért és nem maradt semmi, kilépünk
-            match tokio::time::timeout(std::time::Duration::from_millis(1), subgroup.next()).await {
-                Ok(Ok(Some(object))) => {
-                    // itt most eldobjuk a kifutó objektumot (nem tudjuk visszatenni)
-                    let mut o = object;
-                    while let Some(_chunk) = o.read().await? {}
-                    break;
-                }
-                Ok(Ok(None)) => break,
-                Ok(Err(e)) => return Err(e.into()),
-                Err(_) => { /* semmi, következő kör */ }
-            }
-
-            if heap.is_empty() {
-                if delivery_timeout_ms.is_none() {
-                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-                }
+            // Küldés (változatlan)
+            let hdr = data::SubgroupObject { object_id: object.object_id, size: object.size, status: object.status };
+            writer.encode(&hdr).await?;
+            state.lock_mut().ok_or(ServeError::Done)?
+                .update_max_group_id(subgroup.group_id, object.object_id)?;
+            while let Some(chunk) = object.read().await? {
+                writer.write(&chunk).await?;
             }
         }
 

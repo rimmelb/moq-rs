@@ -39,7 +39,7 @@ INPUT="${INPUT:-dev/bbb_fix.fmp4}"
 # Print out the watch URL
 echo "Watch URL: https://quic.video/watch/$NAME?server=$ADDR"
 
-PUB_RATE_LIMIT_MBPS=${PUB_RATE_LIMIT_MBPS:-"100"}
+PUB_RATE_LIMIT_MBPS=${PUB_RATE_LIMIT_MBPS:-"2"}
 
 # HELYES KONVERZIÓ: használj bc-t a floating point számításhoz
 if command -v bc >/dev/null 2>&1; then

@@ -20,3 +20,10 @@ log = { version = "0.4", features = ["std"] }
 # Use debug symbols in production until things are more stable
 [profile.release]
 debug = true
+
+[patch.crates-io]
+quinn       = { git = "https://github.com/rimmelb/quinn.git", branch = "unified-0.11.9-qp-0.11.13", package = "quinn" }
+quinn-proto = { git = "https://github.com/rimmelb/quinn.git", branch = "unified-0.11.9-qp-0.11.13", package = "quinn-proto" }
+
+[patch."https://github.com/quinn-rs/quinn"]
+quinn-proto = { git = "https://github.com/rimmelb/quinn.git", branch = "unified-0.11.9-qp-0.11.13", package = "quinn-proto" }

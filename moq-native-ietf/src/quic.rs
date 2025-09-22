@@ -89,7 +89,11 @@ impl Endpoint {
         let mut transport = quinn::TransportConfig::default();
         transport.max_idle_timeout(Some(time::Duration::from_secs(10).try_into().unwrap()));
         transport.keep_alive_interval(Some(time::Duration::from_secs(4))); // TODO make this smarter
-        transport.congestion_controller_factory(Arc::new(quinn::congestion::NewRenoConfig::default()));
+
+        let mut bbr = quinn::congestion::BbrConfig::default();
+        bbr.min_pacing_bps(20000000);
+
+        transport.congestion_controller_factory(Arc::new(bbr));
         transport.mtu_discovery_config(None); // Disable MTU discovery
 
         if let Some(rate) = rate_limit {

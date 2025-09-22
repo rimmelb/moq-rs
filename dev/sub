@@ -19,7 +19,7 @@ NAME="${NAME:-bbb}"
 URL="${URL:-"https://$ADDR/$NAME"}"
 
 # Optional: subscriber-side rate limit (pick one of the envs)
-SUB_RATE_LIMIT_MBPS="${SUB_RATE_LIMIT_MBPS:-100}"   # e.g. 1.5
+SUB_RATE_LIMIT_MBPS="${SUB_RATE_LIMIT_MBPS:-2}"   # e.g. 1.5
 SUB_RATE_LIMIT_BPS="${SUB_RATE_LIMIT_BPS:-}"     # e.g. 1500000
 
 # Optional: initial RTT hint in ms
