@@ -67,9 +67,6 @@ impl Session {
                     estimator.bandwidth_mbps()
                 };
 
-                // Always log, even if zero, for debugging
-                //log::info!("[BANDWIDTH] Recv: {:.2} Mbps | Send: {:.2} Mbps", recv_mbps, send_mbps);
-
                 // Show additional bandwidth metrics
                 let recv_bps = recv_mbps * 1_000_000.0;
                 let send_bps = send_mbps * 1_000_000.0;

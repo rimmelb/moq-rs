@@ -8,6 +8,7 @@ use clap::Parser;
 use url::Url;
 
 use crate::tls;
+use quinn::VarInt;
 
 use futures::stream::{FuturesUnordered, StreamExt};
 
@@ -51,18 +52,20 @@ pub struct Endpoint {
 }
 
 pub struct QuinnStatsProvider {
-    conn: quinn::Connection,
+    pub conn: quinn::Connection,
 }
 
 impl QuinnStatsProvider {
     pub fn new(conn: quinn::Connection) -> Self {
         Self { conn }
     }
+    pub fn get_connection(&self) -> quinn::Connection {
+        self.conn.clone()
+    }
 }
 impl QuicStatsProvider for QuinnStatsProvider {
     fn get_stats(&self) -> BoxFuture<'_, Option<(Duration, u64, u64, u64, u64)>> {
         let conn = self.conn.clone();
-
         async move {
             // conn.stats() közvetlenül ConnectionStats-ot ad vissza, nem Result-ot
             let stats = conn.stats();
@@ -80,6 +83,9 @@ impl QuicStatsProvider for QuinnStatsProvider {
         }
         .boxed()
     }
+    fn get_connection(&self) -> quinn::Connection {
+        self.conn.clone()
+    }
 }
 
 impl Endpoint {
@@ -90,27 +96,34 @@ impl Endpoint {
         transport.max_idle_timeout(Some(time::Duration::from_secs(10).try_into().unwrap()));
         transport.keep_alive_interval(Some(time::Duration::from_secs(4))); // TODO make this smarter
 
-        let mut bbr = quinn::congestion::BbrConfig::default();
-        bbr.min_pacing_bps(20000000);
+        let mut bbr = quinn::congestion::BbrConfig::default()
+            .enable_deadline_scheduler(true) // -> Self (by value)
+            .beta(0.8)                       // -> Self
+            .guard_ms(10)                    // -> Self
+            .default_mss(1200);              // -> Self
+
+        // Ez by-&mut Self, ne tedd a láncba:
+        bbr.min_pacing_bps(200_000u64);
 
         transport.congestion_controller_factory(Arc::new(bbr));
         transport.mtu_discovery_config(None); // Disable MTU discovery
 
-        if let Some(rate) = rate_limit {
-            transport.send_window(rate as u64);
-            transport.stream_receive_window(rate.into());
-             // bytes/sec -> bytes
-        }
-
         transport.datagram_receive_buffer_size(rate_limit.map(|r| r as usize));
 
-        // transport.stream_receive_window(window_bytes.into());         // VarInt
-        // transport.send_window(window_bytes as u64);                   // u64
-        // transport.datagram_receive_buffer_size(Some(window_bytes as usize)); // Option<usize>
+        let target_bps = 1_000_000.0;      // 1 Mbps
+        let rtt_ms     = 10.0;            // pl. 10 ms
+        let window_bytes = ((target_bps * (rtt_ms / 1000.0)) / 8.0) as u64;
 
-        if let Some(rtt) = rtt {
-            transport.initial_rtt(Duration::from_millis(rtt as u64));
-        }
+        // stream_receive_window: VarInt kell -> clamp u32-re és konvertálj
+        let srw = VarInt::from_u32(window_bytes.min(u32::MAX as u64) as u32);
+        transport.stream_receive_window(srw);
+
+        // send_window: u64-et vár -> ok
+        transport.send_window(window_bytes);
+
+        // datagram buffer: usize -> ok
+        transport.datagram_receive_buffer_size(Some(window_bytes as usize));
+
 
         let transport = Arc::new(transport);
 
@@ -118,7 +131,7 @@ impl Endpoint {
 
         if let Some(mut config) = config.tls.server {
             config.alpn_protocols = vec![
-                web_transport_quinn::ALPN.to_vec(),
+                web_transport_quinn::ALPN.as_bytes().to_vec(),
                 moq_transport::setup::ALPN.to_vec(),
             ];
             config.key_log = Arc::new(rustls::KeyLogFile::new());
@@ -208,22 +221,22 @@ impl Server {
             server_name,
         );
 
-        let session = match alpn.as_bytes() {
-            web_transport_quinn::ALPN => {
-                // Wait for the CONNECT request.
-                let request = web_transport_quinn::accept(conn)
-                    .await
-                    .context("failed to receive WebTransport request")?;
-
-                // Accept the CONNECT request.
-                request
-                    .ok()
-                    .await
-                    .context("failed to respond to WebTransport request")?
-            }
-            // A bit of a hack to pretend like we're a WebTransport session
-            moq_transport::setup::ALPN => conn.into(),
-            _ => anyhow::bail!("unsupported ALPN: {}", alpn),
+        // FIX: Use proper WebTransport API
+        let session: web_transport::Session = if alpn == web_transport_quinn::ALPN {
+            let request = web_transport_quinn::Request::accept(conn) // FIX: Use Request::accept
+                .await
+                .context("failed to receive WebTransport request")?;
+            let sess = request
+                .ok()
+                .await
+                .context("failed to respond to WebTransport request")?;
+            sess.into()
+        } else if alpn.as_bytes() == moq_transport::setup::ALPN {
+            // For MoQ, create a dummy URL since we don't have the original URL here
+            let dummy_url = Url::parse("moqt://localhost").unwrap();
+            web_transport_quinn::Session::raw(conn, dummy_url).into()
+        } else {
+            anyhow::bail!("unsupported ALPN: {}", alpn)
         };
 
         Ok(session.into())
@@ -273,19 +286,22 @@ impl Server {
         let provider = Some(Arc::new(QuinnStatsProvider::new(conn.clone())));
 
         // WebTransport / MoQ session
-        let session = match alpn.as_bytes() {
-            web_transport_quinn::ALPN => {
-                // WebTransport szerver oldali accept
-                let request = web_transport_quinn::accept(conn)
-                    .await
-                    .context("failed to receive WebTransport request")?;
-                request
-                    .ok()
-                    .await
-                    .context("failed to respond to WebTransport request")?
-            }
-            moq_transport::setup::ALPN => conn.into(),
-            _ => anyhow::bail!("unsupported ALPN: {}", alpn),
+        // FIX: Use proper WebTransport API
+        let session: web_transport::Session = if alpn == web_transport_quinn::ALPN {
+            let request = web_transport_quinn::Request::accept(conn) // FIX: Use Request::accept
+                .await
+                .context("failed to receive WebTransport request")?;
+            let sess = request
+                .ok()
+                .await
+                .context("failed to respond to WebTransport request")?;
+            sess.into()
+        } else if alpn.as_bytes() == moq_transport::setup::ALPN {
+            // For MoQ, create a dummy URL since we don't have the original URL here
+            let dummy_url = Url::parse("moqt://localhost").unwrap();
+            web_transport_quinn::Session::raw(conn, dummy_url).into()
+        } else {
+            anyhow::bail!("unsupported ALPN: {}", alpn)
         };
 
         Ok((session.into(), provider))
@@ -313,7 +329,8 @@ impl Client {
 
         // TODO support connecting to both ALPNs at the same time
         config.alpn_protocols = vec![match url.scheme() {
-            "https" => web_transport_quinn::ALPN.to_vec(),
+            "https" => web_transport_quinn::ALPN.as_bytes().to_vec(),
+            // &[u8] konstansnál NEM kell as_bytes()
             "moqt" => moq_transport::setup::ALPN.to_vec(),
             _ => anyhow::bail!("url scheme must be 'https' or 'moqt'"),
         }];
@@ -343,8 +360,8 @@ impl Client {
 
         // create webtransport session from the connection (adjust to your existing API)
         let session = match url.scheme() {
-            "https" => web_transport_quinn::connect_with(connection, url).await?,
-            "moqt" => connection.into(),
+            "https" => web_transport_quinn::Session::connect(connection, url.clone()).await?,
+            "moqt" => web_transport_quinn::Session::raw(connection, url.clone()),
             _ => unreachable!(),
         };
 

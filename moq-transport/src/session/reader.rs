@@ -18,7 +18,7 @@ impl Reader {
     pub fn new(stream: web_transport::RecvStream) -> Self {
         Self {
             stream,
-            buffer: Default::default(),
+            buffer: BytesMut::with_capacity(16 * 1024),
             bandwidth_estimator: None,
         }
     }
@@ -29,7 +29,7 @@ impl Reader {
     ) -> Self {
         Self {
             stream,
-            buffer: Default::default(),
+            buffer: BytesMut::with_capacity(16 * 1024),
             bandwidth_estimator: Some(bandwidth_estimator),
         }
     }
@@ -40,67 +40,52 @@ impl Reader {
 
             let required = match T::decode(&mut cursor) {
                 Ok(msg) => {
-                    let bytes_consumed = cursor.position() as usize;
-
-                    if let Some(ref estimator) = self.bandwidth_estimator {
-                        let mut est = estimator.lock().await; // was: try_lock()
-                        est.record_bytes(bytes_consumed as u64);
-                        est.update();
-                    }
-
-                    self.buffer.advance(bytes_consumed);
+                    self.buffer.advance(cursor.position() as usize);
                     return Ok(msg);
                 }
                 Err(DecodeError::More(required)) => self.buffer.len() + required,
                 Err(err) => return Err(err.into()),
             };
 
+            // Töltsd a pufferbe, amíg el nem érjük a szükséges méretet vagy EOF
             loop {
-                let before_len = self.buffer.len();
-                if !self.stream.read_buf(&mut self.buffer).await? {
-                    return Err(DecodeError::More(required - self.buffer.len()).into());
-                };
-
-                let bytes_read = self.buffer.len() - before_len;
-                if bytes_read > 0 {
-                    if let Some(ref estimator) = self.bandwidth_estimator {
-                        let mut est = estimator.lock().await; // was: try_lock()
-                        est.record_bytes(bytes_read as u64);
-                        est.update();
+                match self.stream.read_buf(&mut self.buffer).await? {
+                    Some(n) => {
+                        if let Some(est) = &self.bandwidth_estimator {
+                            let mut e = est.lock().await;
+                            e.record_bytes(n as u64);
+                            let _ = e.update();
+                        }
+                        if self.buffer.len() >= required {
+                            break;
+                        }
                     }
-                }
-
-                if self.buffer.len() >= required {
-                    break;
+                    None => {
+                        // többet nem kapunk, jelezd, hogy több kellene
+                        return Err(DecodeError::More(required - self.buffer.len()).into());
+                    }
                 }
             }
         }
     }
 
     pub async fn read_chunk(&mut self, max: usize) -> Result<Option<Bytes>, SessionError> {
+        // Először szolgáljuk ki a belső puffert
         if !self.buffer.is_empty() {
             let size = cmp::min(max, self.buffer.len());
             let data = self.buffer.split_to(size).freeze();
-
-            if let Some(ref estimator) = self.bandwidth_estimator {
-                let mut est = estimator.lock().await; // was: try_lock()
-                est.record_bytes(size as u64);
-                est.update();
-            }
-
             return Ok(Some(data));
         }
 
-        let chunk = self.stream.read_chunk(max).await?;
-
-        if let Some(ref chunk_data) = chunk {
-            if let Some(ref estimator) = self.bandwidth_estimator {
-                let mut est = estimator.lock().await; // was: try_lock()
-                est.record_bytes(chunk_data.len() as u64);
-                est.update();
+        // Közvetlen olvasás a transzporttól chunk-ban
+        let chunk = self.stream.read(max).await?;
+        if let Some(bytes) = &chunk {
+            if let Some(est) = &self.bandwidth_estimator {
+                let mut e = est.lock().await;
+                e.record_bytes(bytes.len() as u64);
+                let _ = e.update();
             }
         }
-
         Ok(chunk)
     }
 
@@ -108,7 +93,6 @@ impl Reader {
         if !self.buffer.is_empty() {
             return Ok(false);
         }
-
-        Ok(!self.stream.read_buf(&mut self.buffer).await?)
+        Ok(self.stream.read_buf(&mut self.buffer).await?.is_none())
     }
 }

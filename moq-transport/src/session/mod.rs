@@ -27,8 +27,6 @@ use writer::*;
 use futures::{stream::FuturesUnordered, StreamExt};
 use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
-// FIX: helyes import a writer modulból
-use self::writer::RateLimiter;
 
 use crate::watch::Queue;
 use crate::util::BandwidthEstimator;
@@ -38,6 +36,7 @@ use futures::future::BoxFuture;
 // A QUIC stat provider trait a transport oldalon
 pub trait QuicStatsProvider: Send + Sync {
     fn get_stats(&self) -> BoxFuture<'_, Option<(std::time::Duration, u64, u64, u64, u64)>>;
+    fn get_connection(&self) -> quinn::Connection;
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -57,16 +56,13 @@ pub struct DeadlineSchedulerConfig {
 #[must_use = "run() must be called"]
 pub struct Session {
     webtransport: web_transport::Session,
-    // FIX: TokioMutex
     sender: Arc<TokioMutex<Writer>>,
     recver: Reader,
     publisher: Option<Publisher>,
     subscriber: Option<Subscriber>,
-    // FIX: teljes név
     pub outgoing: Queue<message::Message>,
 
     // Bandwidth estimators for incoming and outgoing data
-    // FIX: TokioMutex
     pub recv_bandwidth_estimator: Arc<TokioMutex<BandwidthEstimator>>,
     pub send_bandwidth_estimator: Arc<TokioMutex<BandwidthEstimator>>,
 
@@ -74,58 +70,54 @@ pub struct Session {
     quic_stats_provider: Option<Arc<dyn QuicStatsProvider + Send + Sync>>,
 
     // Send rate limit in bits per second (opcionális)
-    send_rate_limit_bps: Option<f64>,
+    // TÖRÖLVE: send_rate_limit_bps: Option<f64>,
     // ÚJ: megosztott limiter (Publisher és Writer-ek részére)
-    pub send_rate_limiter: Option<Arc<TokioMutex<RateLimiter>>>,
-    // ÚJ: deadline ütemező konfiguráció handle-je
+    // pub send_rate_limiter: Option<Arc<TokioMutex<RateLimiter>>>,
     pub deadline_scheduler: Arc<TokioMutex<Option<DeadlineSchedulerConfig>>>,
 }
 
 impl Session {
     fn new(
         webtransport: web_transport::Session,
-        mut sender: Writer,
+        sender: Writer,
         recver: Reader,
         role: setup::Role,
-        rate_limit_bps: Option<f64>,
+        _rate_limit_bps: Option<f64>,
+        stats: Option<Arc<dyn QuicStatsProvider + Send + Sync>>,
     ) -> (Session, Option<Publisher>, Option<Subscriber>) {
         let (outgoing_send, outgoing_recv) = Queue::default().split();
-
-        // Megosztott limiter (mindig létrehozzuk)
-        let initial_bps = rate_limit_bps.unwrap_or(10_000_000_000.0) as u64;
-        let rate_limiter = Some(Arc::new(TokioMutex::new(RateLimiter::new(initial_bps))));
 
         // KÖZÖS estimátorok
         let recv_estimator = Arc::new(TokioMutex::new(BandwidthEstimator::with_cross_layer()));
         let send_estimator = Arc::new(TokioMutex::new(BandwidthEstimator::with_cross_layer()));
 
-        // FONTOS: a kontrollcsatorna Writer-e is kapja meg a limiter-t
-        sender.set_rate_limiter(rate_limiter.clone());
+        // kontrollcsatorna Writer-e NEM kap limiter-t
+        // sender.set_rate_limiter(...); // TÖRÖLVE
 
-        // ÚJ: deadline scheduler config közös handle
+        // közös deadline handle
         let deadline_scheduler = Arc::new(TokioMutex::new(None));
 
-        let publisher = match role {
+        // építs Publisher/Subscriber
+        let (publisher, subscriber) = match role {
             setup::Role::Publisher | setup::Role::Both => {
-                Some(Publisher::with_bandwidth_and_rate_limit(
+                let publisher = Some(Publisher::with_bandwidth_and_rate_limit(
                     outgoing_send.clone(),
                     webtransport.clone(),
                     send_estimator.clone(),
-                    rate_limit_bps,
-                    rate_limiter.clone(),
-                    // átadjuk a deadline handle-t is
+                    None, // app rate limit off
+                    // TÖRÖLVE: rate_limiter
                     deadline_scheduler.clone(),
-                ))
+                    stats.clone(),
+                ));
+                (publisher, None)
             }
-            _ => None,
+            setup::Role::Subscriber => {
+                let subscriber = Some(Subscriber::new(outgoing_send));
+                (None, subscriber)
+            }
         };
 
-        let subscriber = match role {
-            setup::Role::Subscriber | setup::Role::Both => Some(Subscriber::new(outgoing_send)),
-            _ => None,
-        };
-
-        let session = Self {
+        let session = Session {
             webtransport,
             sender: Arc::new(TokioMutex::new(sender)),
             recver,
@@ -134,10 +126,10 @@ impl Session {
             outgoing: outgoing_recv,
             recv_bandwidth_estimator: recv_estimator,
             send_bandwidth_estimator: send_estimator,
-            quic_stats_provider: None,
-            send_rate_limit_bps: rate_limit_bps,
-            send_rate_limiter: rate_limiter,
-            deadline_scheduler, // ÚJ
+            // FONTOS: ne dobd el a provider-t
+            quic_stats_provider: stats.clone(),
+            // TÖRÖLVE: send_rate_limit_bps, send_rate_limiter
+            deadline_scheduler,
         };
 
         (session, publisher, subscriber)
@@ -178,12 +170,10 @@ impl Session {
     ) -> Result<(Session, Option<Publisher>, Option<Subscriber>), SessionError> {
         let control = session.open_bi().await?;
 
-        // FIX: TokioMutex
         let recv_estimator = Arc::new(TokioMutex::new(BandwidthEstimator::with_cross_layer()));
         let send_estimator = Arc::new(TokioMutex::new(BandwidthEstimator::with_cross_layer()));
 
-        // Writer with rate limiting (control csatorna: nincs limiter)
-        let mut sender = Writer::with_rate_limit(control.0, Some(send_estimator.clone()), None);
+        let mut sender = Writer::with_bandwidth_estimator(control.0, send_estimator.clone());
         let mut recver = Reader::with_bandwidth_estimator(control.1, recv_estimator.clone());
 
         let versions: setup::Versions = [setup::Version::DRAFT_07].into();
@@ -215,7 +205,60 @@ impl Session {
                 _ => setup::Role::Publisher,
             },
         };
-        Ok(Session::new(session, sender, recver, role, None)) // None rate limit
+        Ok(Session::new(session, sender, recver, role, None, None)) // None rate limit
+    }
+
+    // ÚJ: accept_with_stats
+    pub async fn accept_with_stats(
+        session: web_transport::Session,
+        stats: Option<Arc<dyn QuicStatsProvider + Send + Sync>>,
+    ) -> Result<(Session, Option<Publisher>, Option<Subscriber>), SessionError> {
+        Self::accept_role_with_stats(session, setup::Role::Both, stats).await
+    }
+
+    // ÚJ: accept_role_with_stats
+    pub async fn accept_role_with_stats(
+        mut session: web_transport::Session,
+        role: setup::Role,
+        stats: Option<Arc<dyn QuicStatsProvider + Send + Sync>>,
+    ) -> Result<(Session, Option<Publisher>, Option<Subscriber>), SessionError> {
+        let control = session.accept_bi().await?;
+
+        let recv_estimator = Arc::new(TokioMutex::new(BandwidthEstimator::with_cross_layer()));
+        let send_estimator = Arc::new(TokioMutex::new(BandwidthEstimator::with_cross_layer()));
+
+        let mut sender = Writer::with_bandwidth_estimator(control.0, send_estimator.clone());
+        let mut recver = Reader::with_bandwidth_estimator(control.1, recv_estimator.clone());
+
+        let client: setup::Client = recver.decode().await?;
+        log::debug!("received client SETUP: {:?}", client);
+
+        if !client.versions.contains(&setup::Version::DRAFT_07) {
+            return Err(SessionError::Version(client.versions, [setup::Version::DRAFT_07].into()));
+        }
+
+        let role = match client.role {
+            setup::Role::Both => role,
+            setup::Role::Publisher => match role {
+                setup::Role::Publisher => return Err(SessionError::RoleIncompatible(client.role, role)),
+                _ => setup::Role::Subscriber,
+            },
+            setup::Role::Subscriber => match role {
+                setup::Role::Subscriber => return Err(SessionError::RoleIncompatible(client.role, role)),
+                _ => setup::Role::Publisher,
+            },
+        };
+
+        let server = setup::Server {
+            role,
+            version: setup::Version::DRAFT_07,
+            params: Default::default(),
+        };
+        log::debug!("sending server SETUP: {:?}", server);
+        sender.encode(&server).await?;
+
+        let (session, pubr, subr) = Session::new(session, sender, recver, role, None, stats);
+        Ok((session, pubr, subr))
     }
 
     pub async fn accept(
@@ -230,11 +273,10 @@ impl Session {
     ) -> Result<(Session, Option<Publisher>, Option<Subscriber>), SessionError> {
         let control = session.accept_bi().await?;
 
-        // FIX: TokioMutex
         let recv_estimator = Arc::new(TokioMutex::new(BandwidthEstimator::with_cross_layer()));
         let send_estimator = Arc::new(TokioMutex::new(BandwidthEstimator::with_cross_layer()));
 
-        let mut sender = Writer::with_rate_limit(control.0, Some(send_estimator.clone()), None);
+        let mut sender = Writer::with_bandwidth_estimator(control.0, send_estimator.clone());
         let mut recver = Reader::with_bandwidth_estimator(control.1, recv_estimator.clone());
 
         let client: setup::Client = recver.decode().await?;
@@ -271,7 +313,7 @@ impl Session {
 
         log::debug!("sending server SETUP: {:?}", server);
         sender.encode(&server).await?;
-        Ok(Session::new(session, sender, recver, role, None)) // None rate limit
+        Ok(Session::new(session, sender, recver, role, None, None)) // None rate limit
     }
 
     // Hiányzó metódusok hozzáadása
@@ -291,18 +333,11 @@ impl Session {
     ) -> Result<(Session, Option<Publisher>, Option<Subscriber>), SessionError> {
         let control = session.open_bi().await?;
 
-        // FIX: TokioMutex
         let recv_estimator = Arc::new(TokioMutex::new(BandwidthEstimator::with_cross_layer()));
         let send_estimator = Arc::new(TokioMutex::new(BandwidthEstimator::with_cross_layer()));
 
-        // FIX: konkrét limiter példány a Writer-nek
-        let ctrl_limiter = rate_limit_bps.map(|bps| Arc::new(TokioMutex::new(RateLimiter::new(bps as u64))));
-
-        let mut sender = Writer::with_rate_limit(
-            control.0,
-            Some(send_estimator.clone()),
-            ctrl_limiter,
-        );
+        // TÖRÖLVE: ctrl_limiter
+        let mut sender = Writer::with_bandwidth_estimator(control.0, send_estimator.clone());
         let mut recver = Reader::with_bandwidth_estimator(control.1, recv_estimator.clone());
 
         let versions: setup::Versions = [setup::Version::DRAFT_07].into();
@@ -336,7 +371,7 @@ impl Session {
         };
 
         // Biztosítsd, hogy a rate_limit_bps átkerül a Session::new-be
-        let (mut session, pubr, subr) = Session::new(session, sender, recver, role, rate_limit_bps);
+        let (mut session, pubr, subr) = Session::new(session, sender, recver, role, rate_limit_bps, stats);
 
         // Rate limit debug log
         if let Some(rate) = rate_limit_bps {
@@ -357,8 +392,7 @@ impl Session {
 
     pub fn set_fixed_send_bandwidth_mbps(&mut self, mbps: Option<f64>) {
         if let Some(rate) = mbps {
-            log::debug!("Setting fixed send bandwidth: {:.2} Mbps", rate);
-            self.send_rate_limit_bps = Some(rate * 1_000_000.0);
+            log::debug!("(no-op) fixed send bandwidth requested: {:.2} Mbps", rate);
         }
     }
 
@@ -388,18 +422,8 @@ impl Session {
 
     /// Másold át a session szintű küldési limitet a Publisher-be és a limiterbe is.
     pub fn apply_send_rate_limit_to_publisher(&mut self) {
-        if let (Some(rate), Some(p)) = (self.send_rate_limit_bps, self.publisher.as_mut()) {
-            p.rate_limit_bps = Some(rate);
-            if let Some(ref limiter) = self.send_rate_limiter {
-                let rate = rate as u64;
-                let mut rt = futures::executor::block_on(limiter.lock());
-                rt.set_bps(rate);
-            }
-            log::debug!(
-                "Applied session send rate limit to Publisher: {:.0} bps ({:.2} Mbps)",
-                rate, rate / 1_000_000.0
-            );
-        }
+        // App-szintű limiter eltávolítva: no-op
+        log::debug!("(no-op) apply_send_rate_limit_to_publisher");
     }
 
     pub async fn run(self, shared_state: SharedState) -> Result<(), SessionError> {
@@ -410,7 +434,7 @@ impl Session {
         // CLONES PER TASK
         let recv_bw_estimator = this.recv_bandwidth_estimator.clone();
         let send_bw_estimator = this.send_bandwidth_estimator.clone();
-        let send_rate_limiter = this.send_rate_limiter.clone();
+        // let send_rate_limiter = this.send_rate_limiter.clone(); // TÖRÖLVE
         let send_bw_estimator_for_watcher = send_bw_estimator.clone();
         let recv_bw_estimator_for_monitor = recv_bw_estimator.clone();
         let send_bw_estimator_for_monitor = send_bw_estimator.clone();
@@ -420,24 +444,27 @@ impl Session {
             loop {
                 shared_state_clone.wait_for_change().await;
 
-                // 1) din. rate limit
                 if let Some(bps) = shared_state_clone.get_rate_limit_bps() {
-                    if let Some(ref limiter) = send_rate_limiter {
-                        let mut guard = limiter.lock().await;
-                        guard.set_bps(bps as u64);
-                        guard.drain();
-                    }
+                    // App limiter nincs; csak az estimator reset
                     let mut est = send_bw_estimator_for_watcher.lock().await;
                     est.reset();
-                    log::info!("Dynamic rate limit updated to: {} bps ({:.2} Mbps)", bps, (bps as f64)/1_000_000.0);
+                    log::info!(
+                        "Dynamic rate limit updated (transport-only): {} bps ({:.2} Mbps)",
+                        bps,
+                        (bps as f64) / 1_000_000.0
+                    );
                 }
 
-                // 2) deadline scheduler config
                 if let Some(cfg) = shared_state_clone.get_deadline_scheduler() {
                     let mut h = deadline_cfg_handle.lock().await;
                     *h = Some(cfg.clone());
-                    log::info!("Deadline scheduler updated: enabled={} mode={:?} guard={}ms beta={:.2}",
-                        cfg.enabled, cfg.mode, cfg.guard_ms, cfg.beta);
+                    log::info!(
+                        "Deadline scheduler updated: enabled={} mode={:?} guard={}ms beta={:.2}",
+                        cfg.enabled,
+                        cfg.mode,
+                        cfg.guard_ms,
+                        cfg.beta
+                    );
                 }
             }
         };

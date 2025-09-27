@@ -5,7 +5,6 @@ use std::{
 
 use futures::{stream::FuturesUnordered, StreamExt};
 use tokio::sync::Mutex as TokioMutex;
-use super::writer::RateLimiter;
 
 use crate::{
     coding::Tuple,
@@ -37,11 +36,11 @@ pub struct Publisher {
     // Rate limit for all outgoing streams
     pub rate_limit_bps: Option<f64>,
 
-    // ÚJ: megosztott limiter
-    pub rate_limiter: Option<Arc<TokioMutex<RateLimiter>>>,
-
     // ÚJ: deadline ütemező konfiguráció
     deadline_scheduler: Arc<TokioMutex<Option<crate::session::DeadlineSchedulerConfig>>>,
+
+    // Optional statistics provider
+    pub stats: Option<Arc<dyn super::QuicStatsProvider + Send + Sync>>,
 }
 
 impl Publisher {
@@ -56,8 +55,8 @@ impl Publisher {
             url: Arc::new(Mutex::new(String::new())),
             send_bandwidth_estimator: Arc::new(TokioMutex::new(BandwidthEstimator::with_cross_layer())),
             rate_limit_bps: None,
-            rate_limiter: None,
             deadline_scheduler: Arc::new(TokioMutex::new(None)),
+            stats: None,
         }
     }
 
@@ -66,8 +65,8 @@ impl Publisher {
         webtransport: web_transport::Session,
         send_bandwidth_estimator: Arc<TokioMutex<BandwidthEstimator>>,
         rate_limit_bps: Option<f64>,
-        rate_limiter: Option<Arc<TokioMutex<RateLimiter>>>,
         deadline_scheduler: Arc<TokioMutex<Option<crate::session::DeadlineSchedulerConfig>>>,
+        stats: Option<Arc<dyn super::QuicStatsProvider + Send + Sync>>,
     ) -> Self {
         if let Some(rate) = rate_limit_bps {
             log::info!("Publisher created with rate limit: {:.0} bps ({:.2} Mbps)", rate, rate / 1_000_000.0);
@@ -81,25 +80,37 @@ impl Publisher {
             url: Arc::new(Mutex::new(String::new())),
             send_bandwidth_estimator,
             rate_limit_bps,
-            rate_limiter,
             deadline_scheduler,
+            stats,
         }
     }
 
     pub fn get_deadline_scheduler(&self) -> Arc<TokioMutex<Option<crate::session::DeadlineSchedulerConfig>>> {
         self.deadline_scheduler.clone()
     }
-    pub fn get_rate_limiter(&self) -> Option<Arc<TokioMutex<RateLimiter>>> {
-        self.rate_limiter.clone()
-    }
+
     pub fn get_rate_limit_bps(&self) -> Option<f64> {
         self.rate_limit_bps
+    }
+
+    // adj egy connection() segédfüggvényt
+    pub fn connection(&self) -> Option<quinn::Connection> {
+        self.stats.as_ref().map(|p| p.get_connection())
     }
 
     pub async fn accept(
         session: web_transport::Session,
     ) -> Result<(Session, Publisher), SessionError> {
         let (session, publisher, _) = Session::accept_role(session, setup::Role::Publisher).await?;
+        Ok((session, publisher.unwrap()))
+    }
+
+    pub async fn accept_with_stats(
+        session: web_transport::Session,
+        stats: Option<Arc<dyn super::QuicStatsProvider + Send + Sync>>,
+    ) -> Result<(Session, Publisher), SessionError> {
+        let (session, publisher, _) =
+            Session::accept_role_with_stats(session, setup::Role::Publisher, stats).await?;
         Ok((session, publisher.unwrap()))
     }
 
@@ -408,12 +419,6 @@ impl Publisher {
     }
 
     pub(super) async fn send_datagram(&mut self, data: bytes::Bytes) -> Result<(), SessionError> {
-        // Rate limit enforcement a datagramokra is
-        if let Some(ref limiter) = self.rate_limiter {
-            let mut l = limiter.lock().await;
-            l.acquire(data.len()).await;
-        }
-
         // Bandwidth accounting
         {
             let mut estimator = self.send_bandwidth_estimator.lock().await;

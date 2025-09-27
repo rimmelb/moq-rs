@@ -1,4 +1,5 @@
 use std::net;
+use std::sync::Arc;
 
 use anyhow::Context;
 
@@ -103,31 +104,43 @@ impl Relay {
             tasks.push(producer.run().boxed());
             consumer
         });
+        let mut provider: Option<Arc<dyn moq_transport::session::QuicStatsProvider + Send + Sync>> = None;
 
-        // Forward session rate limit alkalmazása (ha van)
+        // Forward session
         let forward = if let Some(url) = &self.announce {
             log::info!("forwarding announces to {}", url);
-            let session = self
+            let (session, raw_provider) = self
                 .quic
                 .client
-                .connect(url)
+                .connect_with_stats(url)
                 .await
                 .context("failed to establish forward connection")?;
 
+            provider = raw_provider.map(|p| p as Arc<_>);
+
             let (mut session, publisher, subscriber) = if let Some(rate) = self.rate_limit_bps {
                 let rate = rate as f64;
-                log::info!("Forward session rate limit: {:.0} bps ({:.2} Mbps)", rate, rate / 1_000_000.0);
+                log::info!(
+                    "Forward session rate limit: {:.0} bps ({:.2} Mbps)",
+                    rate,
+                    rate / 1_000_000.0
+                );
                 moq_transport::session::Session::connect_role_with_rate_limit(
                     session,
                     moq_transport::setup::Role::Both,
-                    None,
-                    Some(rate)
-                ).await.context("failed to establish forward session with rate limit")?
+                    provider.clone(),
+                    Some(rate),
+                )
+                .await
+                .context("failed to establish forward session with rate limit")?
             } else {
-                moq_transport::session::Session::connect_role(
+                moq_transport::session::Session::connect_role_with_stats(
                     session,
-                    moq_transport::setup::Role::Both
-                ).await.context("failed to establish forward session")?
+                    moq_transport::setup::Role::Both,
+                    provider.clone(),
+                )
+                .await
+                .context("failed to establish forward session")?
             };
 
             let session = Session {
@@ -162,8 +175,13 @@ impl Relay {
 
         loop {
             tokio::select! {
-                res = server.accept() => {
-                    let conn = res.context("failed to accept QUIC connection")?;
+                res = server.accept_with_stats() => {
+                    let (conn_session, raw_provider) =
+                    res.context("failed to accept QUIC connection")?;
+                    let provider: Option<
+                    Arc<dyn moq_transport::session::QuicStatsProvider + Send + Sync>
+                    > = raw_provider.map(|p| p as Arc<_>);
+
                     let rate_limit = self.rate_limit_bps;
                     let locals = locals.clone();
                     let api = api.clone();
@@ -172,9 +190,10 @@ impl Relay {
                     let shared_state = shared_state.clone();
 
                     tasks.push(async move {
-                        let (mut session, publisher, subscriber) = moq_transport::session::Session::accept(conn)
-                            .await
-                            .context("failed to accept MoQ session")?;
+                        let (mut session, publisher, subscriber) =
+                            moq_transport::session::Session::accept_with_stats(conn_session, provider)
+                                .await
+                                .context("failed to accept MoQ session")?;
 
                         if let Some(rate) = rate_limit {
                             // Set fixed send bandwidth in Mbps, then propagate to Publisher
@@ -207,7 +226,6 @@ impl Relay {
                         Ok::<(), anyhow::Error>(())
                     }.boxed());
                 },
-
                 res = tasks.next(), if !tasks.is_empty() => res.unwrap()?,
             }
         }

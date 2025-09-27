@@ -3,14 +3,8 @@ use crate::{coding, serve, setup};
 
 #[derive(thiserror::Error, Debug, Clone)]
 pub enum SessionError {
-    #[error("webtransport session: {0}")]
-    Session(#[from] web_transport::SessionError),
-
-    #[error("webtransport write: {0}")]
-    Write(#[from] web_transport::WriteError),
-
-    #[error("webtransport read: {0}")]
-    Read(#[from] web_transport::ReadError),
+    #[error("webtransport error: {0}")]
+    Transport(#[from] web_transport::Error),
 
     #[error("encode error: {0}")]
     Encode(#[from] coding::EncodeError),
@@ -22,11 +16,10 @@ pub enum SessionError {
     #[error("unsupported versions: client={0:?} server={1:?}")]
     Version(setup::Versions, setup::Versions),
 
-    // TODO move to a ConnectError
     #[error("incompatible roles: client={0:?} server={1:?}")]
     RoleIncompatible(setup::Role, setup::Role),
 
-    /// The role negiotiated in the handshake was violated. For example, a publisher sent a SUBSCRIBE, or a subscriber sent an OBJECT.
+    /// The role negiotiated in the handshake was violated.
     #[error("role violation")]
     RoleViolation,
 
@@ -57,9 +50,7 @@ impl SessionError {
         match self {
             Self::RoleIncompatible(..) => 406,
             Self::RoleViolation => 405,
-            Self::Session(_) => 503,
-            Self::Read(_) => 500,
-            Self::Write(_) => 500,
+            Self::Transport(_) => 503,
             Self::Version(..) => 406,
             Self::Decode(_) => 400,
             Self::Encode(_) => 500,

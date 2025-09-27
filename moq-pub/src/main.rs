@@ -141,28 +141,30 @@ async fn connect_to_other_session(cli: Cli, mut url: Url, r: TracksReader) -> an
 
         log::info!("Connecting to relay: url={}", url);
 
-        let (wt_session, provider) = match quic.client.connect_with_stats(&url).await {
+        let (wt_session, raw_provider) = match quic.client.connect_with_stats(&url).await {
             Ok(x) => x,
             Err(e) => {
                 log::error!("Connection failed: {}. Retrying...", e);
-                sleep(std::time::Duration::from_secs(5)).await;
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 continue;
             }
         };
-
         let provider: Option<Arc<dyn moq_transport::session::QuicStatsProvider + Send + Sync>> =
-            provider.map(|p| p as Arc<_>);
+            raw_provider.map(|p| p as Arc<_>);
 
         // Create session and publisher with rate limiting support
         let (session, mut publisher) = if cli.rate_limit_bps.is_some() || provider.is_some() {
             moq_transport::session::Publisher::connect_with_stats_and_rate_limit(
                 wt_session,
-                provider,
+                provider, // trait-objektumként továbbadva
                 cli.rate_limit_bps.map(|r| r as f64),
-            ).await.context("failed to create MoQ Transport session with stats and rate limit")?
+            )
+            .await
+            .context("failed to create MoQ Transport session with stats and rate limit")?
         } else {
             moq_transport::session::Publisher::connect(wt_session)
-                .await.context("failed to create MoQ Transport session")?
+                .await
+                .context("failed to create MoQ Transport session")?
         };
 
         if let Some(rate) = cli.rate_limit_bps {
@@ -171,8 +173,6 @@ async fn connect_to_other_session(cli: Cli, mut url: Url, r: TracksReader) -> an
         }
 
         let shared_state = SharedState::new();
-
-        // Use the TracksReader to announce tracks (media is created once in main)
         let result = tokio::select! {
             res = session.run(shared_state) => res.context("session error"),
             res = publisher.announce(r.clone()) => res.context("failed to serve tracks"),
@@ -187,7 +187,8 @@ async fn connect_to_other_session(cli: Cli, mut url: Url, r: TracksReader) -> an
             }
             Err(e) => {
                 log::error!("Error occurred: {}. Retrying...", e);
-                sleep(std::time::Duration::from_secs(5)).await;
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                continue; // RECURSION helyett retry loop
             }
         }
     }
