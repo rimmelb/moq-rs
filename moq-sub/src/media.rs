@@ -37,6 +37,34 @@ impl<O: AsyncWrite + Send + Unpin + 'static> Media<O> {
         })
     }
 
+    // Írj ki egy subgroupot úgy, hogy csak teljes moof+mdat páros menjen ki.
+    async fn write_subgroup_paired(
+        mut group: SubgroupReader,
+        out: Arc<Mutex<O>>,
+    ) -> anyhow::Result<()> {
+        let mut pending: Option<Vec<u8>> = None;
+
+        while let Some(object) = group.next().await? {
+            let expected = object.size;
+            let buf = Self::recv_object(object).await?;
+            if buf.len() != expected {
+                warn!("dropping truncated fragment object: expected {}B, got {}B", expected, buf.len());
+                pending = None;
+                continue;
+            }
+
+            if let Some(mut first) = pending.take() {
+                // második objektum (jellemzően mdat) → fűzd és írd ki együtt
+                first.extend_from_slice(&buf);
+                out.lock().await.write_all(&first).await?;
+            } else {
+                // első objektum (jellemzően moof) → tartsd pendingben
+                pending = Some(buf);
+            }
+        }
+        Ok(())
+    }
+
     pub async fn run(&mut self) -> anyhow::Result<()> {
         let moov = {
             let init_track_name = "0.mp4";
@@ -80,7 +108,7 @@ impl<O: AsyncWrite + Send + Unpin + 'static> Media<O> {
         };
 
         let mut has_video = false;
-        let mut has_audio = false;
+        let mut has_audio = false; // hagyjuk hamisan, ne írjunk audio-t ugyanarra a kimenetre
         let mut tracks = vec![];
         for trak in &moov.traks {
             let id = trak.tkhd.track_id;
@@ -92,11 +120,8 @@ impl<O: AsyncWrite + Send + Unpin + 'static> Media<O> {
                 has_video = true;
                 info!("using {name} for video");
             }
-            if !has_audio && trak.mdia.minf.stbl.stsd.mp4a.is_some() {
-                active = true;
-                has_audio = true;
-                info!("using {name} for audio");
-            }
+            // FONTOS: ne írjunk audio-t ugyanarra a bytestreamre, mert az érvénytelen MP4 lesz.
+            // Ha kell audio, írd külön kimenetre és remuxold (lásd lent).
             if active {
                 let track = self
                     .tracks_writer
@@ -120,7 +145,18 @@ impl<O: AsyncWrite + Send + Unpin + 'static> Media<O> {
             let out = self.output.clone();
             tasks.spawn(async move {
                 let name = track.name.clone();
-                if let Err(err) = Self::recv_track(track, out).await {
+                if let Err(err) = async {
+                    match track.mode().await? {
+                        TrackReaderMode::Subgroups(mut groups) => {
+                            while let Some(group) = groups.next().await? {
+                                // csak párosan írjuk ki
+                                Self::write_subgroup_paired(group, out.clone()).await?;
+                            }
+                        }
+                        _ => anyhow::bail!("expected subgroups mode"),
+                    }
+                    Ok::<_, anyhow::Error>(())
+                }.await {
                     warn!("failed to play track {name}: {err:?}");
                 }
             });
@@ -145,19 +181,15 @@ impl<O: AsyncWrite + Send + Unpin + 'static> Media<O> {
     }
 
     async fn recv_group(mut group: SubgroupReader, out: Arc<Mutex<O>>) -> anyhow::Result<()> {
-        trace!("group={} start", group.group_id);
         while let Some(object) = group.next().await? {
-            trace!(
-                "group={} fragment={} start",
-                group.group_id,
-                object.object_id
-            );
-            let out = out.clone();
+            let expected = object.size;
             let buf = Self::recv_object(object).await?;
-
+            if buf.len() != expected {
+                warn!("dropping truncated fragment: expected {}B, got {}B", expected, buf.len());
+                continue;
+            }
             out.lock().await.write_all(&buf).await?;
         }
-
         Ok(())
     }
 

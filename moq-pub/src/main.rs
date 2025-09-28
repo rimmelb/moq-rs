@@ -18,6 +18,31 @@ use moq_transport::{
     session::SharedState,
 };
 
+use tracing_subscriber::{fmt, EnvFilter};
+use tracing_subscriber::prelude::*;
+
+fn init_tracing() {
+    // RUST_LOG-al is felülírható, pl.:
+    // RUST_LOG="bbr.deadline=debug,moq_transport=info,quinn=warn" cargo run -- ...
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| {
+            // Alapértelmezett: bbr.deadline=debug, Quinn csak warn
+            "bbr.deadline=debug,moq_transport=info,quinn=warn,moq_native_ietf=info".parse().unwrap()
+        });
+
+    let fmt_layer = fmt::layer()
+        .with_target(true)      // mutassa a "bbr.deadline" targetet
+        .with_thread_ids(false)
+        .with_level(true)       // szint is látszódjon
+        .compact();             // kompakt, egy soros formátum
+
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(fmt_layer)
+        .init();
+}
+
+
 #[derive(Parser, Clone)]
 pub struct Cli {
     /// Listen for UDP packets on the given address.
@@ -68,6 +93,8 @@ async fn main() -> anyhow::Result<()> {
         .with_max_level(tracing::Level::WARN)
         .finish();
     tracing::subscriber::set_global_default(tracer).unwrap();
+
+    //init_tracing();
 
     let mut cli = Cli::parse();
     let mut url = cli.url.clone();

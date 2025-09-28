@@ -97,31 +97,29 @@ impl Endpoint {
         transport.keep_alive_interval(Some(time::Duration::from_secs(4))); // TODO make this smarter
 
         let mut bbr = quinn::congestion::BbrConfig::default()
+            .fixed_pacing_bps(50_000)
             .enable_deadline_scheduler(true) // -> Self (by value)
             .beta(0.8)                       // -> Self
             .guard_ms(10)                    // -> Self
             .default_mss(1200);              // -> Self
 
-        // Ez by-&mut Self, ne tedd a láncba:
-        bbr.min_pacing_bps(200_000u64);
+        bbr.min_pacing_bps(50_000);
 
         transport.congestion_controller_factory(Arc::new(bbr));
         transport.mtu_discovery_config(None); // Disable MTU discovery
 
-        transport.datagram_receive_buffer_size(rate_limit.map(|r| r as usize));
-
-        let target_bps = 1_000_000.0;      // 1 Mbps
-        let rtt_ms     = 10.0;            // pl. 10 ms
+        let target_bps = 50_000.0;     // 50 Kbps
+        let rtt_ms     = 100.0;           // pl. 20 ms
         let window_bytes = ((target_bps * (rtt_ms / 1000.0)) / 8.0) as u64;
 
-        // stream_receive_window: VarInt kell -> clamp u32-re és konvertálj
+        // // stream_receive_window: VarInt kell -> clamp u32-re és konvertálj
         let srw = VarInt::from_u32(window_bytes.min(u32::MAX as u64) as u32);
         transport.stream_receive_window(srw);
 
-        // send_window: u64-et vár -> ok
+        // // send_window: u64-et vár -> ok
         transport.send_window(window_bytes);
 
-        // datagram buffer: usize -> ok
+        // // datagram buffer: usize -> ok
         transport.datagram_receive_buffer_size(Some(window_bytes as usize));
 
 

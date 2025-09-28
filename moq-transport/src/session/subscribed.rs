@@ -186,99 +186,115 @@ async fn serve_one_subgroup(
     state: State<SubscribedState>,
     delivery_timeout_ms: Option<u64>,
 ) -> Result<(), SessionError> {
-    // Subgroup uni stream megnyitása és subgroup header küldése
-    let mut stream = publisher.open_uni().await?;
-    stream.set_priority(subgroup.priority as i32);
+    // Subgroup meta adatok loghoz a move-ok előtt
+    let sg_group_id = header.group_id;
+    let sg_subgroup_id = header.subgroup_id;
+    let sg_base_prio = subgroup.priority as i32;
 
+    // Uni stream nyitás + kezdeti prioritás
+    let mut stream = publisher.open_uni().await?;
+    stream.set_priority(sg_base_prio);
+
+    // Író headroom-becslővel
     let bandwidth_estimator = publisher.send_bandwidth_estimator.clone();
     let mut writer = Writer::with_bandwidth_estimator(stream, bandwidth_estimator);
 
-    let header_msg: data::Header = header.into();
+    // SubgroupHeader → data::Header (NE mozgassuk el a header-t a további logok elől)
+    let header_msg: data::Header = header.clone().into();
     if let Err(e) = writer.encode(&header_msg).await {
-        // Peer azonnal leállította a streamet → lépjünk ki a subgroupból, ne spameljünk hibákkal
-        log::warn!("subgroup header write stopped by peer: {e}");
+        log::warn!(
+            "subgroup header write stopped by peer (g={}, sg={}): {e}",
+            sg_group_id,
+            sg_subgroup_id
+        );
         return Ok(());
     }
 
+    // Objektumok küldése
     while let Some(mut object) = subgroup.next().await? {
-        // Kötelező (pl. init) objektum definíció — ezeket NEM dobjuk
-        let is_init = object.object_id == 0;
+        // Csak a legelső init (g=0,o=0) legyen kötelező
+        let is_init = subgroup.group_id == 0;
 
-        // Friss időpillanat és deadline MINDEN objektumnál
+        // Deadline számítás a Subscribe-ban kapott timeout alapján
         let now = Instant::now();
-        let deadline: Option<Instant> = delivery_timeout_ms
-            .and_then(|ms| (ms > 0).then(|| now + Duration::from_millis(ms)));
+        let within = delivery_timeout_ms.and_then(|ms| (ms > 0).then(|| Duration::from_millis(ms)));
+        let deadline = within.map(|w| now + w);
 
-        // Quinn admission: csak akkor tud dönteni, ha van provider/conn
-        let can_send = if let Some(conn) = publisher.connection() {
-            conn.can_send_suggestion(object.size as u64, deadline, now)
+        //log::debug!("subgroup object size: {}", object.size);
+
+        // Időalapú admission a Quinn/BBR felé
+        let time_ok = if let (Some(conn), Some(dl)) = (publisher.connection(), deadline) {
+            conn.can_send_suggestion(object.size as u64, Some(dl), now)
         } else {
-            true // nincs provider → ne dobjunk (fallback)
+            true
         };
 
-        if !can_send && !is_init {
+        // Ha nem fér be a timeoutba és nem init, ELDOBJUK az objektumot — header/payload nélkül
+        if !time_ok && !is_init {
             log::debug!(
-                "🚫 drop by CC admission: g={}, o={}, size={}B, deadline={:?}",
+                "🚫 drop by time admission: g={}, o={}, size={}B, deadline={:?}",
                 subgroup.group_id,
                 object.object_id,
                 object.size,
                 deadline
             );
-            // Draineld a readert, különben backpressure marad
+            // Drain-eljük a reader-t, hogy a forrás tovább tudjon lépni.
             while let Some(_chunk) = object.read().await? {}
-            continue;
+            return Ok(());
         }
 
-        // Prioritás javaslat Quinnből (ha nincs conn, marad a subgroup priority)
+        // Quinn-től javasolt prioritás (initre hagyjuk 0-n)
         let suggested_priority = if is_init {
             0
         } else if let Some(conn) = publisher.connection() {
             conn.suggest_object_priority(object.size as u64, deadline, now)
         } else {
-            subgroup.priority as i32
+            sg_base_prio
         };
         writer.stream.set_priority(suggested_priority);
 
-        // Objektum fejléce (csak akkor írjuk ki, ha már eldöntöttük, hogy küldjük)
-        let hdr = data::SubgroupObject {
+        // Objektum header KÜLDÉSE CSAK vállalás után
+        let ob_hdr = data::SubgroupObject {
             object_id: object.object_id,
             size: object.size,
             status: object.status,
         };
-        if let Err(e) = writer.encode(&hdr).await {
-            // A peer leállította a streamet header közben → drain & ugorj a következő objektumra
+        if let Err(e) = writer.encode(&ob_hdr).await {
             log::warn!(
-                "peer stopped stream while sending object header (g={}, o={}): {e}",
+                "peer stopped at object header (g={}, o={}): {e}",
                 subgroup.group_id,
                 object.object_id
             );
+            // Drain + stream reset, majd lezárjuk ezt a subgroup-ot
             while let Some(_chunk) = object.read().await? {}
-            continue;
+            let _ = writer.stream.reset(0);
+            return Ok(());
         }
 
-        // Max group/object állapot frissítése
+        // Max (group,object) frissítés, miután “láthatóvá” tettük az objektumot a peer felé
         state
             .lock_mut()
             .ok_or(ServeError::Done)?
             .update_max_group_id(subgroup.group_id, object.object_id)?;
 
-        // Payload küldés — write hiba esetén draineljük és lépünk tovább
+        // Payload írás ciklusa
         while let Some(chunk) = object.read().await? {
             if let Err(e) = writer.write(&chunk).await {
                 log::warn!(
-                    "write stopped mid-object (g={}, o={}): {e}; draining and skipping rest",
+                    "write stopped mid-object (g={}, o={}): {e}; draining and finishing subgroup",
                     subgroup.group_id,
                     object.object_id
                 );
+                // Drain a maradék olvasására
                 while let Some(_c) = object.read().await? {}
-                break; // következő objektum
+                // Ezt az uni streamet már nem tudjuk folytatni -> reset és vissza
+                let _ = writer.stream.reset(0);
+                return Ok(());
             }
         }
     }
-
     Ok(())
 }
-
 
 
     async fn serve_datagrams(

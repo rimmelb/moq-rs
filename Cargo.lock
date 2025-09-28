@@ -135,9 +135,9 @@ dependencies = [
 
 [[package]]
 name = "aws-lc-sys"
-version = "0.32.0"
+version = "0.32.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee74396bee4da70c2e27cf94762714c911725efe69d9e2672f998512a67a4ce4"
+checksum = "1ba2e2516bdf37af57fc6ff047855f54abad0066e5c4fdaaeb76dabb2e05bcf5"
 dependencies = [
  "bindgen",
  "cc",
@@ -961,7 +961,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.0",
  "system-configuration 0.6.1",
  "tokio",
  "tower-service",
@@ -1243,7 +1243,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "07033963ba89ebaf1584d767badaa2e8fcec21aedea6b8c0346d487d49c28667"
 dependencies = [
  "cfg-if",
- "windows-targets 0.48.5",
+ "windows-targets 0.53.4",
 ]
 
 [[package]]
@@ -1285,6 +1285,15 @@ name = "lru-slab"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
+
+[[package]]
+name = "matchers"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1525a2a28c7f4fa0fc98bb91ae755d1e2d1505079e05539e35bc876b5d65ae9"
+dependencies = [
+ "regex-automata",
+]
 
 [[package]]
 name = "matchit"
@@ -1434,6 +1443,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+ "tracing-log",
  "tracing-subscriber",
  "url",
 ]
@@ -1793,7 +1803,7 @@ dependencies = [
 [[package]]
 name = "quinn"
 version = "0.11.9"
-source = "git+https://github.com/rimmelb/quinn.git?branch=unified-0.11.9-qp-0.11.13#f8b6b8791158150fa33f2a064e1fd5c5f927c7af"
+source = "git+https://github.com/rimmelb/quinn.git?branch=unified-0.11.9-qp-0.11.13#0302a7a4c2ddc4b991b5093f64f91fe3df59f210"
 dependencies = [
  "bytes",
  "cfg_aliases",
@@ -1802,7 +1812,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls 0.23.32",
- "socket2 0.5.10",
+ "socket2 0.6.0",
  "thiserror 2.0.16",
  "tokio",
  "tracing",
@@ -1812,7 +1822,7 @@ dependencies = [
 [[package]]
 name = "quinn-proto"
 version = "0.11.13"
-source = "git+https://github.com/rimmelb/quinn.git?branch=unified-0.11.9-qp-0.11.13#f8b6b8791158150fa33f2a064e1fd5c5f927c7af"
+source = "git+https://github.com/rimmelb/quinn.git?branch=unified-0.11.9-qp-0.11.13#0302a7a4c2ddc4b991b5093f64f91fe3df59f210"
 dependencies = [
  "aws-lc-rs",
  "bytes",
@@ -1835,12 +1845,12 @@ dependencies = [
 [[package]]
 name = "quinn-udp"
 version = "0.5.14"
-source = "git+https://github.com/rimmelb/quinn.git?branch=unified-0.11.9-qp-0.11.13#f8b6b8791158150fa33f2a064e1fd5c5f927c7af"
+source = "git+https://github.com/rimmelb/quinn.git?branch=unified-0.11.9-qp-0.11.13#0302a7a4c2ddc4b991b5093f64f91fe3df59f210"
 dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.0",
  "tracing",
  "windows-sys 0.60.2",
 ]
@@ -2855,10 +2865,14 @@ version = "0.3.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2054a14f5307d601f88daf0553e1cbf472acc4f2c51afab632431cdcd72124d5"
 dependencies = [
+ "matchers",
  "nu-ansi-term",
+ "once_cell",
+ "regex-automata",
  "sharded-slab",
  "smallvec",
  "thread_local",
+ "tracing",
  "tracing-core",
  "tracing-log",
 ]
@@ -3163,7 +3177,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.1",
 ]
 
 [[package]]

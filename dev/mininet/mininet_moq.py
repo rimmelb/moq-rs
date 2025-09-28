@@ -1,134 +1,91 @@
 #!/usr/bin/env python3
 from mininet.net import Mininet
-from mininet.node import OVSController
+from mininet.node import OVSController, Host
 from mininet.link import TCLink
 from mininet.log import setLogLevel, info
 from mininet.cli import CLI
 import argparse
-import math
 import os
 
-def bdp_queue_pkts(bw_mbps, rtt_ms, mss_bytes=1200, factor=1.5):
-    """Durva becslés: queue ~ factor * BDP (pkt)"""
-    bps = bw_mbps * 1e6
-    bdp_bytes = bps * (rtt_ms/1000.0) / 8.0
-    pkts = max(100, int(factor * bdp_bytes / mss_bytes))
-    return pkts
+def start(bw_pr=50, bw_bottleneck=0.5, bw_sr=50, delay_ms='50ms', loss=0.0):
+    setLogLevel('info')
+    net = Mininet(controller=OVSController, link=TCLink, autoSetMacs=True)
 
-def main():
-    parser = argparse.ArgumentParser(description="Mininet topology for moq.rs (pub–relay–sub)")
-    parser.add_argument("--bw-pub-relay", type=float, default=5.0, help="bw pub↔relay (Mbps)")
-    parser.add_argument("--bw-relay-sub", type=float, default=5.0, help="bw relay↔sub (Mbps)")
-    parser.add_argument("--delay-pub-relay", default="10ms", help="RTT/2-ish delay string for pub↔relay (e.g. 10ms)")
-    parser.add_argument("--delay-relay-sub", default="10ms", help="RTT/2-ish delay string for relay↔sub")
-    parser.add_argument("--loss-pub-relay", type=float, default=0.0, help="loss % pub↔relay")
-    parser.add_argument("--loss-relay-sub", type=float, default=0.0, help="loss % relay↔sub")
-    parser.add_argument("--rtt-hint-ms", type=int, default=10, help="RTT hint you pass to your QUIC (for window calc)")
-
-    # opcionális: automatikus indítás a te skriptjeiddel
-    parser.add_argument("--auto-run", action="store_true", help="start relay/publisher/subscriber commands")
-    parser.add_argument("--relay-cmd", default="./relay_with_bandwidth",
-                        help="relay indító bináris/script (host=relay)")
-    parser.add_argument("--pub-cmd", default="./pub_with_bandwidth",
-                        help="publisher bináris/script (host=pub)")
-    parser.add_argument("--sub-cmd", default="./sub",
-                        help="subscriber bináris/script (host=sub)")
-    parser.add_argument("--relay-port", type=int, default=4443, help="relay QUIC/HTTPS port")
-
-    args = parser.parse_args()
-
-    setLogLevel("info")
-    info("*** Building network\n")
-
-    # Queue méret — a bw és a rtt alapján
-    q_pub_relay = bdp_queue_pkts(args.bw_pub_relays if hasattr(args, 'bw_pub_relays') else args.bw_pub_relay,
-                                 args.rtt_hint_ms)
-    q_relay_sub = bdp_queue_pkts(args.bw_relay_sub, args.rtt_hint_ms)
-
-    net = Mininet(controller=OVSController, link=TCLink, autoSetMacs=True, autoStaticArp=True)
-
+    s1 = net.addSwitch('s1')
     c0 = net.addController('c0')
 
-    # Három host
-    pub = net.addHost('pub', ip='10.0.0.1/24')
+    pub   = net.addHost('pub',   ip='10.0.0.1/24')
     relay = net.addHost('relay', ip='10.0.0.2/24')
-    sub = net.addHost('sub', ip='10.0.0.3/24')
+    sub   = net.addHost('sub',   ip='10.0.0.3/24')
 
-    # Két switch, hogy a két szakasz külön formázható legyen
-    s1 = net.addSwitch('s1')
-    s2 = net.addSwitch('s2')
+    # Linkek: pub–relay irányban nagyobb sávszél, relay–sub a szűk keresztmetszet
+    net.addLink(pub,   s1, bw=bw_pr,         delay=delay_ms, loss=loss, max_queue_size=100)
+    net.addLink(relay, s1, bw=bw_bottleneck, delay=delay_ms, loss=loss, max_queue_size=50)
+    net.addLink(sub,   s1, bw=bw_sr,         delay=delay_ms, loss=loss, max_queue_size=100)
 
-    # Linkek
-    # pub -- s1
-    net.addLink(pub, s1,
-                bw=args.bw_pub_relay,
-                delay=args.delay_pub_relay,
-                loss=args.loss_pub_relay,
-                max_queue_size=q_pub_relay)
-
-    # s1 -- relay
-    net.addLink(s1, relay,
-                bw=args.bw_pub_relay,
-                delay=args.delay_pub_relay,
-                loss=args.loss_pub_relay,
-                max_queue_size=q_pub_relay)
-
-    # relay -- s2
-    net.addLink(relay, s2,
-                bw=args.bw_relays if hasattr(args, 'bw_relays') else args.bw_relay_sub,
-                delay=args.delay_relay_sub,
-                loss=args.loss_relay_sub,
-                max_queue_size=q_relay_sub)
-
-    # s2 -- sub
-    net.addLink(s2, sub,
-                bw=args.bw_relays if hasattr(args, 'bw_relays') else args.bw_relay_sub,
-                delay=args.delay_relay_sub,
-                loss=args.loss_relay_sub,
-                max_queue_size=q_relay_sub)
-
-    info("*** Starting network\n")
     net.start()
 
-    # Routing: egy broadcast domain, default gw nem kell; ARP autoStaticArp=true
+    # Munka könyvtár: a repo gyökere (ugyanaz fs minden hostnak)
+    root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+    bins = os.path.join(root, 'target', 'release')
 
-    # Opcionális auto-run: indítsuk a te binárisaidat a megfelelő hostokon
-    if args.auto_run:
-        info("*** Launching relay on 10.0.0.2:{}\n".format(args.relay_port))
-        # Figyelem a certre: IP-SAN vagy --tls.insecure jellegű flag kellhet
-        relay_cmd = (
-            f"{args.relay_cmd} "
-            f"--bind [::]:{args.relay_port} "
-            f"--rtt-ms {args.rtt_hint_ms} "
-        )
-        relay.popen(relay_cmd, shell=True)
+    # Tanúsítvány (ha még nincs)
+    if not os.path.exists(os.path.join(root, 'dev', 'localhost.crt')):
+        os.system(f'cd {root} && ./dev/cert')
 
-        info("*** Launching subscriber on sub (connect to relay)\n")
-        # ha HTTPS-t használsz és self-signed cert, kellhet egy --tls.insecure jellegű opció
-        # moqt sémát is használhatsz, ha támogatott: moqt://10.0.0.2:{port}
-        sub_url = f"https://10.0.0.2:{args.relay_port}"
-        sub_cmd = f"{args.sub_cmd} {sub_url}"
-        sub.popen(sub_cmd, shell=True)
+    # Relay indítása (10.0.0.2:4443)
+    relay_cmd = (
+        f'cd {root} && '
+        f'RUST_LOG=info '
+        f'{bins}/moq-relay-ietf '
+        f'--bind 10.0.0.2:4443 '
+        f'--tls-cert dev/localhost.crt --tls-key dev/localhost.key '
+        f'> relay.log 2>&1 &'
+    )
+    info(f'*** start relay: {relay_cmd}\n')
+    relay.cmd(relay_cmd)
 
-        info("*** Launching publisher on pub (connect to relay)\n")
-        pub_url = f"https://10.0.0.2:{args.relay_port}"
-        # állítsd a saját argumentumaidat (name/fps/bitrate/tls/rtt/rate_limit), pl.:
-        pub_cmd = (
-            f"{args.pub_cmd} "
-            f"--name desk/1.m4s "
-            f"--fps 24 --bitrate 1500000 "
-            f"--initial-rtt-ms {args.rtt_hint_ms} "
-            f"{pub_url}"
-        )
-        pub.popen(pub_cmd, shell=True)
+    # Publisher: csővezeték a tesztfájlra, vagy ffmpeg. Itt a dev/bbb.fmp4-et használjuk.
+    pub_input = os.path.join(root, 'dev', 'bbb.fmp4')
+    if not os.path.exists(pub_input):
+        info('*** dev/bbb.fmp4 hiányzik, futtasd előtte ./dev/pub a hoston a letöltéshez/konvertáláshoz\n')
+    pub_cmd = (
+        f'cd {root} && '
+        f'RUST_LOG=moq_transport=debug,moq_pub=info '
+        f'cat {pub_input} | {bins}/moq-pub '
+        f'--tls-disable-verify '
+        f'--name bbb '
+        f'https://10.0.0.2:4443 '
+        f'> pub.log 2>&1 &'
+    )
+    info(f'*** start publisher: {pub_cmd}\n')
+    pub.cmd(pub_cmd)
 
-        info("*** Processes started. Use the CLI to monitor.\n")
+    # Subscriber: csatlakozik a relay-hez (IP alapú URL), TLS verify off
+    sub_cmd = (
+        f'cd {root} && '
+        f'RUST_LOG=moq_transport=debug,moq_sub=info '
+        f'{bins}/moq-sub '
+        f'--tls-disable-verify '
+        f'--name bbb '
+        f'https://10.0.0.2:4443/bbb '
+        f'> sub.log 2>&1 &'
+    )
+    info(f'*** start subscriber: {sub_cmd}\n')
+    sub.cmd(sub_cmd)
 
-    info("*** Ready. Type 'exit' to stop.\n")
+    info('*** fut: relay.log / pub.log / sub.log a repo gyökerében\n')
+    info('*** Mininet CLI: pl. link újrakonfigurálás: link s1-relay bw 0.3 delay 80ms\n')
     CLI(net)
 
-    info("*** Stopping network\n")
     net.stop()
 
-if __name__ == "__main__":
-    main()
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--bw-pr', type=float, default=50.0, help='pub–switch bw (Mbit/s)')
+    parser.add_argument('--bw-bottleneck', type=float, default=0.5, help='relay–switch bw (Mbit/s)')
+    parser.add_argument('--bw-sr', type=float, default=50.0, help='sub–switch bw (Mbit/s)')
+    parser.add_argument('--delay', default='50ms', help='link delay (e.g. 50ms)')
+    parser.add_argument('--loss', type=float, default=0.0, help='packet loss percent')
+    args = parser.parse_args()
+    start(args.bw_pr, args.bw_bottleneck, args.bw_sr, args.delay, args.loss)
