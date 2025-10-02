@@ -35,6 +35,9 @@ pub struct RelayConfig {
 
     /// Initial RTT hint in milliseconds for QUIC transport
     pub rtt_ms: Option<u32>, // <- NEW
+
+    /// Delivery timeout in seconds for the relay to wait for a consumer to connect
+    pub delivery_timeout: Option<u64>
 }
 
 pub struct Relay {
@@ -47,6 +50,7 @@ pub struct Relay {
     relay_stopping_state: SharedState,
     bandwidth_monitoring: Option<u64>,
     rate_limit_bps: Option<u32>, // új mező
+    delivery_timeout: Option<u64>, // új mező
 }
 
 //for Goaway -> curl -X POST "https://localhost:4443/goaway?url=https://localhost:4442&timeout=5"
@@ -94,6 +98,7 @@ impl Relay {
             relay_stopping_state,
             bandwidth_monitoring: config.bandwidth_monitoring,
             rate_limit_bps: config.rate_limit_bps, // új mező
+            delivery_timeout: config.delivery_timeout, // új mező
         })
     }
 
@@ -155,7 +160,7 @@ impl Relay {
             let shared_state = self.shared_state.clone();
             let forward = session.producer.clone();
             tasks.push(
-                async move { session.run(shared_state).await.context("forwarding failed") }.boxed(),
+                async move { session.run(shared_state, self.delivery_timeout.clone()).await.context("forwarding failed") }.boxed(),
             );
 
             forward
@@ -214,11 +219,11 @@ impl Relay {
                             log::info!("Starting session with bandwidth monitoring (interval: {}s)", interval);
                             let rate_limit = rate_limit.map(|r| r as f64);
                             let effective_rate = rate_limit.unwrap_or(0.0); // 0.0 = no cap
-                            if let Err(err) = session.run_with_bandwidth_monitoring(shared_state, interval, effective_rate).await {
+                            if let Err(err) = session.run_with_bandwidth_monitoring(shared_state, interval, effective_rate, self.delivery_timeout.clone()).await {
                                 log::warn!("failed to run MoQ session with bandwidth monitoring: {}", err);
                             }
                         } else {
-                            if let Err(err) = session.run(shared_state).await {
+                            if let Err(err) = session.run(shared_state, self.delivery_timeout.clone()).await {
                                 log::warn!("failed to run MoQ session: {}", err);
                             }
                         }

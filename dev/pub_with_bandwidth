@@ -36,7 +36,7 @@ INPUT="${INPUT:-dev/bbb.fmp4}"
 # Print out the watch URL
 echo "Watch URL: https://quic.video/watch/$NAME?server=$ADDR"
 
-PUB_RATE_LIMIT_MBPS=${PUB_RATE_LIMIT_MBPS:-"2"}
+PUB_RATE_LIMIT_MBPS=${PUB_RATE_LIMIT_MBPS:-"3"}
 
 # HELYES KONVERZIÓ: használj bc-t a floating point számításhoz
 if command -v bc >/dev/null 2>&1; then
@@ -55,7 +55,6 @@ EXTRA_ARGS=()
 if [ -n "${INITIAL_RTT_MS}" ]; then
   EXTRA_ARGS+=(--initial-rtt-ms "${INITIAL_RTT_MS}")
 fi
-
 
 
 # Run ffmpeg and pipe the output to moq-pub with bandwidth monitoring

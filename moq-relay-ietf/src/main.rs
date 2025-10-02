@@ -63,6 +63,9 @@ pub struct Cli {
     /// Initial RTT hint in milliseconds for QUIC transport
     #[arg(long, value_name="MS")]
     pub initial_rtt_ms: Option<u32>,
+
+    #[arg(long)]
+    pub delivery_timeout: Option<u64>,
 }
 
 #[tokio::main]
@@ -96,6 +99,7 @@ async fn main() -> anyhow::Result<()> {
             bandwidth_monitoring: cli.bandwidth_monitoring,
             rate_limit_bps: cli.rate_limit_bps,
             rtt_ms: cli.initial_rtt_ms,
+            delivery_timeout: cli.delivery_timeout
         },
         shared_state.clone(),
         relay_stopping_state.clone(),

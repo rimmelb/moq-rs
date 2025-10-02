@@ -961,7 +961,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.0",
+ "socket2 0.5.10",
  "system-configuration 0.6.1",
  "tokio",
  "tower-service",
@@ -1243,7 +1243,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "07033963ba89ebaf1584d767badaa2e8fcec21aedea6b8c0346d487d49c28667"
 dependencies = [
  "cfg-if",
- "windows-targets 0.53.4",
+ "windows-targets 0.48.5",
 ]
 
 [[package]]
@@ -1803,7 +1803,7 @@ dependencies = [
 [[package]]
 name = "quinn"
 version = "0.11.9"
-source = "git+https://github.com/rimmelb/quinn.git?branch=unified-0.11.9-qp-0.11.13#0302a7a4c2ddc4b991b5093f64f91fe3df59f210"
+source = "git+https://github.com/rimmelb/quinn.git?branch=unified-0.11.9-qp-0.11.13#26ff48901dcc2d11a89351bfceda92f3b1d6b88e"
 dependencies = [
  "bytes",
  "cfg_aliases",
@@ -1812,7 +1812,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls 0.23.32",
- "socket2 0.6.0",
+ "socket2 0.5.10",
  "thiserror 2.0.16",
  "tokio",
  "tracing",
@@ -1822,7 +1822,7 @@ dependencies = [
 [[package]]
 name = "quinn-proto"
 version = "0.11.13"
-source = "git+https://github.com/rimmelb/quinn.git?branch=unified-0.11.9-qp-0.11.13#0302a7a4c2ddc4b991b5093f64f91fe3df59f210"
+source = "git+https://github.com/rimmelb/quinn.git?branch=unified-0.11.9-qp-0.11.13#26ff48901dcc2d11a89351bfceda92f3b1d6b88e"
 dependencies = [
  "aws-lc-rs",
  "bytes",
@@ -1845,12 +1845,12 @@ dependencies = [
 [[package]]
 name = "quinn-udp"
 version = "0.5.14"
-source = "git+https://github.com/rimmelb/quinn.git?branch=unified-0.11.9-qp-0.11.13#0302a7a4c2ddc4b991b5093f64f91fe3df59f210"
+source = "git+https://github.com/rimmelb/quinn.git?branch=unified-0.11.9-qp-0.11.13#26ff48901dcc2d11a89351bfceda92f3b1d6b88e"
 dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.0",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.60.2",
 ]
@@ -3177,7 +3177,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.1",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

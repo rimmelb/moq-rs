@@ -12,7 +12,7 @@ pub struct Session {
 }
 
 impl Session {
-    pub async fn run(self, shared_state: SharedState) -> Result<(), SessionError> {
+    pub async fn run(self, shared_state: SharedState, delivery_timeout: Option<u64>) -> Result<(), SessionError> {
         let mut tasks = FuturesUnordered::new();
         tasks.push(self.session.run(shared_state.clone()).boxed());
 
@@ -21,7 +21,7 @@ impl Session {
         }
 
         if let Some(consumer) = self.consumer {
-            tasks.push(consumer.run().boxed());
+            tasks.push(consumer.run(delivery_timeout.clone()).boxed());
         }
         tasks.select_next_some().await
     }
@@ -44,7 +44,7 @@ impl Session {
     }
 
     /// Run with periodic bandwidth reporting
-    pub async fn run_with_bandwidth_monitoring(self, shared_state: SharedState, report_interval_secs: u64, rate_limit: f64) -> Result<(), SessionError> {
+    pub async fn run_with_bandwidth_monitoring(self, shared_state: SharedState, report_interval_secs: u64, rate_limit: f64, delivery_timeout: Option<u64>) -> Result<(), SessionError> {
         // Clone the bandwidth estimators before moving self.session
         let recv_estimator = self.session.recv_bandwidth_estimator.clone();
         let send_estimator = self.session.send_bandwidth_estimator.clone();
@@ -101,7 +101,7 @@ impl Session {
         }
 
         if let Some(consumer) = self.consumer {
-            tasks.push(consumer.run().boxed());
+            tasks.push(consumer.run(delivery_timeout.clone()).boxed());
         }
 
         tasks.select_next_some().await

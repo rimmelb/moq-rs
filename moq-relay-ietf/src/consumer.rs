@@ -31,7 +31,7 @@ impl Consumer {
         }
     }
 
-    pub async fn run(mut self) -> Result<(), SessionError> {
+    pub async fn run(mut self, delivery_timeout: Option<u64>) -> Result<(), SessionError> {
         let mut tasks = FuturesUnordered::new();
 
         loop {
@@ -43,7 +43,7 @@ impl Consumer {
                         let info = announce.clone();
                         log::info!("serving announce: {:?}", info);
 
-                        if let Err(err) = this.serve(announce).await {
+                        if let Err(err) = this.serve(announce, delivery_timeout).await {
                             log::warn!("failed serving announce: {:?}, error: {}", info, err)
                         }
                     });
@@ -54,7 +54,7 @@ impl Consumer {
         }
     }
 
-    async fn serve(mut self, mut announce: Announced) -> Result<(), anyhow::Error> {
+    async fn serve(mut self, mut announce: Announced, delivery_timeout: Option<u64>) -> Result<(), anyhow::Error> {
         let mut tasks = FuturesUnordered::new();
 
         let (_, mut request, reader) = Arc::new(Tracks::new(announce.namespace.clone())).produce();
@@ -84,6 +84,8 @@ impl Consumer {
             );
         }
 
+        let ms = delivery_timeout.unwrap_or(u64::MAX);
+
         loop {
             tokio::select! {
                 // If the announce is closed, return the error
@@ -97,7 +99,7 @@ impl Consumer {
                         let info = track.clone();
                         log::info!("forwarding subscribe: {:?}", info);
 
-                        if let Err(err) = remote.subscribe_with_timeout(track, 380).await {
+                        if let Err(err) = remote.subscribe_with_timeout(track, ms).await {
                             log::warn!("failed forwarding subscribe: {:?}, error: {}", info, err)
                         }
 
