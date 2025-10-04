@@ -76,6 +76,23 @@ impl Subscribed {
     }
 
     pub async fn serve(mut self, track: serve::TrackReader) -> Result<(), SessionError> {
+        let delivery_timeout_ms = self.msg.delivery_timeout_ms;
+
+        if let Some(timeout_ms) = delivery_timeout_ms {
+        if let Some(conn) = self.publisher.connection() {
+                // Bekapcsoljuk a deadline schedulert a connection-ön
+                conn.set_deadline_scheduler(true);
+
+                // Számítsuk ki a deadline-t
+                let now = Instant::now();
+                let deadline = now + Duration::from_millis(timeout_ms);
+
+                // Becsült objektum méret (pl. 500KB video fragment)
+                let estimated_size = 500_000u64;
+                conn.set_deadline(estimated_size, Some(deadline), now);
+        }
+    }
+
         let res = self.serve_inner(track).await;
         if let Err(err) = &res {
             self.close(err.clone().into())?;
@@ -145,8 +162,6 @@ impl Subscribed {
     ) -> Result<(), SessionError> {
         let mut tasks = FuturesUnordered::new();
         let mut done: Option<Result<(), ServeError>> = None;
-        let delivery_timeout_ms = self.msg.delivery_timeout_ms;
-
         loop {
             tokio::select! {
                 res = subgroups.next(), if done.is_none() => match res {
@@ -164,7 +179,7 @@ impl Subscribed {
                         let info = subgroup.info.clone();
 
                         tasks.push(async move {
-                            if let Err(err) = Self::serve_one_subgroup(header, subgroup, publisher, state, delivery_timeout_ms).await {
+                            if let Err(err) = Self::serve_one_subgroup(header, subgroup, publisher, state).await {
                                 log::warn!("failed to serve group: {:?}, error: {}", info, err);
                             }
                         });
@@ -179,125 +194,76 @@ impl Subscribed {
         }
     }
 
+
 async fn serve_one_subgroup(
     header: data::SubgroupHeader,
     mut subgroup: serve::SubgroupReader,
     mut publisher: Publisher,
     state: State<SubscribedState>,
-    delivery_timeout_ms: Option<u64>,
 ) -> Result<(), SessionError> {
-    // Subgroup meta adatok loghoz a move-ok előtt
     let sg_group_id = header.group_id;
     let sg_subgroup_id = header.subgroup_id;
     let sg_base_prio = subgroup.priority as i32;
 
-    // Uni stream nyitás + kezdeti prioritás
+    // ✅ 1. Uni stream nyitás
     let mut stream = publisher.open_uni().await?;
     stream.set_priority(sg_base_prio);
 
-    // Író headroom-becslővel
     let bandwidth_estimator = publisher.send_bandwidth_estimator.clone();
     let mut writer = Writer::with_bandwidth_estimator(stream, bandwidth_estimator);
 
-    // SubgroupHeader → data::Header (NE mozgassuk el a header-t a további logok elől)
+    // ✅ 3. SubgroupHeader küldés (ez még deadline ELŐTT megy)
     let header_msg: data::Header = header.clone().into();
     if let Err(e) = writer.encode(&header_msg).await {
         log::warn!(
             "subgroup header write stopped by peer (g={}, sg={}): {e}",
-            sg_group_id,
-            sg_subgroup_id
+            sg_group_id, sg_subgroup_id
         );
         return Ok(());
     }
 
-    // Objektumok küldése
+    // ✅ 4. Objektumok küldése deadline alatt
     while let Some(mut object) = subgroup.next().await? {
-        // Csak a legelső init (g=0,o=0) legyen kötelező
-        let is_init = subgroup.group_id == 0;
-
-        // Deadline számítás a Subscribe-ban kapott timeout alapján
-        let now = Instant::now();
-        let within = delivery_timeout_ms.and_then(|ms| (ms > 0).then(|| Duration::from_millis(ms)));
-        let deadline = within.map(|w| now + w);
-
-        //log::debug!("subgroup object size: {}", object.size);
-
-        // Időalapú admission a Quinn/BBR felé
-        let time_ok = if let (Some(conn), Some(dl)) = (publisher.connection(), deadline) {
-            conn.can_send_suggestion(object.size as u64, Some(dl), now)
-        } else {
-            true
-        };
-
-        // Ha nem fér be a timeoutba és nem init, ELDOBJUK az objektumot — header/payload nélkül
-        if !time_ok && !is_init {
-            log::debug!(
-                "🚫 drop by time admission: g={}, o={}, size={}B, deadline={:?}",
-                subgroup.group_id,
-                object.object_id,
-                object.size,
-                deadline
-            );
-            // Drain-eljük a reader-t, hogy a forrás tovább tudjon lépni.
-            while let Some(_chunk) = object.read().await? {}
-            return Ok(());
-        }
-
-        // Quinn-től javasolt prioritás (initre hagyjuk 0-n)
-        let suggested_priority = if is_init {
-            0
-        } else if let Some(conn) = publisher.connection() {
-            conn.suggest_object_priority(object.size as u64, deadline, now)
-        } else {
-            sg_base_prio
-        };
-        writer.stream.set_priority(suggested_priority);
-
-        // Objektum header KÜLDÉSE CSAK vállalás után
         let ob_hdr = data::SubgroupObject {
             object_id: object.object_id,
             size: object.size,
             status: object.status,
         };
+
         if let Err(e) = writer.encode(&ob_hdr).await {
             log::warn!(
                 "peer stopped at object header (g={}, o={}): {e}",
                 subgroup.group_id,
                 object.object_id
             );
-            // Drain + stream reset, majd lezárjuk ezt a subgroup-ot
             while let Some(_chunk) = object.read().await? {}
             let _ = writer.stream.reset(0);
             return Ok(());
         }
 
-        // Max (group,object) frissítés, miután “láthatóvá” tettük az objektumot a peer felé
         state
             .lock_mut()
             .ok_or(ServeError::Done)?
             .update_max_group_id(subgroup.group_id, object.object_id)?;
 
-        // Payload írás ciklusa
         while let Some(chunk) = object.read().await? {
             if let Err(e) = writer.write(&chunk).await {
                 log::warn!(
-                    "write stopped mid-object (g={}, o={}): {e}; draining and finishing subgroup",
+                    "write stopped mid-object (g={}, o={}): {e}",
                     subgroup.group_id,
                     object.object_id
                 );
-                // Drain a maradék olvasására
                 while let Some(_c) = object.read().await? {}
-                // Ezt az uni streamet már nem tudjuk folytatni -> reset és vissza
                 let _ = writer.stream.reset(0);
                 return Ok(());
             }
         }
     }
+
     Ok(())
 }
 
-
-    async fn serve_datagrams(
+async fn serve_datagrams(
         &mut self,
         mut datagrams: serve::DatagramsReader,
     ) -> Result<(), SessionError> {
@@ -326,6 +292,7 @@ async fn serve_one_subgroup(
         }
         Ok(())
     }
+
 }
 
 pub(super) struct SubscribedRecv {

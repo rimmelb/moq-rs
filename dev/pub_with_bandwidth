@@ -36,7 +36,7 @@ INPUT="${INPUT:-dev/bbb.fmp4}"
 # Print out the watch URL
 echo "Watch URL: https://quic.video/watch/$NAME?server=$ADDR"
 
-PUB_RATE_LIMIT_MBPS=${PUB_RATE_LIMIT_MBPS:-"3"}
+PUB_RATE_LIMIT_MBPS=${PUB_RATE_LIMIT_MBPS:-"10"}
 
 # HELYES KONVERZIÓ: használj bc-t a floating point számításhoz
 if command -v bc >/dev/null 2>&1; then
@@ -64,4 +64,4 @@ ffmpeg -hide_banner -v quiet \
     -an \
 	-c copy \
 	-f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer+frag_every_frame \
-	- | cargo run --bin moq-pub -- --bandwidth-monitoring --rate-limit-bps "$PUB_RATE_LIMIT_BPS" --name "$NAME" "$URL" "${EXTRA_ARGS[@]}" "$@"
+	- | cargo run --bin moq-pub -- --bandwidth-monitoring --rate-limit-bps "$PUB_RATE_LIMIT_BPS" --name "$NAME" "$URL" "${EXTRA_ARGS[@]}" "$@" 2>&1 | tee "logs/publisher_$(date +%Y-%m-%d_%H-%M-%S).log"

@@ -95,8 +95,8 @@ impl Endpoint {
         let mut transport = quinn::TransportConfig::default();
 
     transport
-        .max_idle_timeout(Some(time::Duration::from_secs(10).try_into().unwrap()))
-        .keep_alive_interval(Some(time::Duration::from_secs(4)))
+        .max_idle_timeout(Some(time::Duration::from_secs(30).try_into().unwrap()))
+        .keep_alive_interval(Some(time::Duration::from_secs(10)))
         .enable_segmentation_offload(false)            // GSO off → kevesebb micro-burst
         .mtu_discovery_config(None)                    // MTU discovery off
         .initial_mtu(1200)
@@ -108,36 +108,12 @@ impl Endpoint {
 
     // ---- BBR hard-cap ----
     let mut bbr = quinn::congestion::BbrConfig::default()
-        .enable_deadline_scheduler(true)
+        .enable_deadline_scheduler(false)
         .beta(0.8)
         .guard_ms(10)
         .default_mss(1200);
 
-    if let Some(rate_limit_bps32) = rate_limit {
-        let rate_limit_bps = rate_limit_bps32 as u64;
-        bbr = bbr.fixed_pacing_bps(rate_limit_bps);
-        bbr.min_pacing_bps(rate_limit_bps); // opcionális
-    }
-
     transport.congestion_controller_factory(Arc::new(bbr));
-
-    // ---- Ablakok / bufferek a cap-hez igazítva ----
-    if let (Some(target_bps32), Some(rtt_ms)) = (rate_limit, rtt) {
-        let target_bps     = target_bps32 as f64;
-        let rtt_seconds    = (rtt_ms as f64) / 1000.0;
-        let bdp_bytes      = ((target_bps * rtt_seconds) / 8.0) as u64;
-
-        let send_win = 3 * bdp_bytes; // 2–4× BDP javasolt
-        transport.send_window(send_win);
-
-        // DATAGRAM pufferelések kordában tartása:
-        transport.datagram_receive_buffer_size(Some(bdp_bytes as usize));
-        transport.datagram_send_buffer_size((2 * bdp_bytes as usize).clamp(64*1024, 512*1024));
-
-        // A stream_receive_window a BEJÖVŐ forgalomra vonatkozik; hagyhatod a defaultot,
-        // de ha korlátozni akarod a peer→te memóriát, itt állíts kisebbre/BDP-hez.
-        // transport.stream_receive_window(VarInt::from_u32((bdp_bytes.min(u32::MAX as u64)) as u32));
-    }
 
 
         let transport = Arc::new(transport);

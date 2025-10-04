@@ -33,7 +33,8 @@ fn init_tracing() {
     let fmt_layer = fmt::layer()
         .with_target(true)      // mutassa a "bbr.deadline" targetet
         .with_thread_ids(false)
-        .with_level(true)       // szint is látszódjon
+        .with_level(true)
+        .with_ansi(false)       // szint is látszódjon
         .compact();             // kompakt, egy soros formátum
 
     tracing_subscriber::registry()
