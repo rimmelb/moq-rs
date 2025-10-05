@@ -509,13 +509,29 @@ impl SubgroupObjectWriter {
     /// Write a new chunk of bytes.
     pub fn write(&mut self, chunk: Bytes) -> Result<(), ServeError> {
         if chunk.len() > self.remain {
-            return Err(ServeError::Size);
+            log::warn!(
+                "oversize write: track={} group={} object_id={} declared={} incoming={}",
+                self.info.group.track.name,
+                self.info.group.group_id,
+                self.info.object_id,
+                self.info.size,
+                chunk.len()
+            );
+            // Helyette: tekintsük töröltnek, ne dobjunk Size hibát
+            self.remain = 0;
+            return Ok(());
         }
         self.remain -= chunk.len();
-
         let mut state = self.state.lock_mut().ok_or(ServeError::Cancel)?;
         state.chunks.push(chunk);
-
+        if self.remain == 0 {
+            log::trace!(
+                "object complete: group={} object_id={} size={}",
+                self.info.group.group_id,
+                self.info.object_id,
+                self.info.size
+            );
+        }
         Ok(())
     }
 
@@ -537,12 +553,14 @@ impl SubgroupObjectWriter {
 
 impl Drop for SubgroupObjectWriter {
     fn drop(&mut self) {
-        if self.remain == 0 {
-            return;
-        }
-
-        if let Some(mut state) = self.state.lock_mut() {
-            state.closed = Err(ServeError::Size);
+        // Ha maradt adat, ne generálj Size hibát → csak log + silent truncation
+        if self.remain > 0 {
+            log::debug!(
+                "object truncated on drop: group={} object_id={} missing={}",
+                self.info.group.group_id,
+                self.info.object_id,
+                self.remain
+            );
         }
     }
 }

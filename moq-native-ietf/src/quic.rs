@@ -110,7 +110,7 @@ impl Endpoint {
     let mut bbr = quinn::congestion::BbrConfig::default()
         .enable_deadline_scheduler(false)
         .beta(0.5)
-        .guard_ms(5)
+        .guard_ms(3)
         .default_mss(1200);
 
     transport.congestion_controller_factory(Arc::new(bbr));

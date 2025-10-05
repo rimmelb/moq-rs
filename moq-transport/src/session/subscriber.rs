@@ -341,10 +341,8 @@ impl Subscriber {
                     }
                 }
             }
-            break;
-            //prev = Some(group);
+            prev = Some(group);
         }
-
         Ok(())
     }
 
@@ -370,7 +368,7 @@ impl Subscriber {
                             "recv_subgroup: truncated object (g={}, remain={}B), dropping",
                             group.group_id, remain
                         );
-                        break;
+                        return Ok(());
                     }
                 }
             }

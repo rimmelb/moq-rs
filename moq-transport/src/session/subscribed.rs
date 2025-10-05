@@ -9,6 +9,7 @@ use crate::serve::{ServeError, TrackReaderMode};
 use crate::watch::State;
 use crate::{data, message, serve};
 use std::time::{Duration, Instant};
+use rand::Rng;
 
 
 use super::{Publisher, SessionError, SubscribeInfo, Writer};
@@ -211,11 +212,8 @@ async fn serve_one_subgroup(
     let mut stream = publisher.open_uni().await?;
     stream.set_priority(sg_base_prio);
 
-    if let Some(time) = timeout {
-        let now = Instant::now();
-        let deadline = now + Duration::from_millis(time);
-        stream.set_deadline(deadline);
-    }
+    stream.set_deadline(timeout);
+
 
     let bandwidth_estimator = publisher.send_bandwidth_estimator.clone();
     let mut writer = Writer::with_bandwidth_estimator(stream, bandwidth_estimator);
@@ -261,7 +259,7 @@ async fn serve_one_subgroup(
                 );
                 while let Some(_c) = object.read().await? {}
                 // Abort with non-zero application error code (example 0x100)
-                let _ = writer.stream.reset(0x100);
+                let _ = writer.stream.finish();
                 return Ok(());
             }
         }
