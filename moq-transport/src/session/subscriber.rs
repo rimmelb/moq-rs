@@ -341,8 +341,8 @@ impl Subscriber {
                     }
                 }
             }
-
-            prev = Some(group);
+            break;
+            //prev = Some(group);
         }
 
         Ok(())

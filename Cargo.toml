@@ -13,10 +13,10 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
-web-transport = { git = "https://github.com/rimmelb/web-transport.git", branch = "main", package = "web-transport" }
-web-transport-quinn     = { git = "https://github.com/rimmelb/web-transport.git", branch = "main", package = "web-transport-quinn" }
-web-transport-proto     = { git = "https://github.com/rimmelb/web-transport.git", branch = "main", package = "web-transport-proto" }
-web-transport-trait     = { git = "https://github.com/rimmelb/web-transport.git", branch = "main", package = "web-transport-trait" }
+web-transport = { git = "https://github.com/rimmelb/web-transport.git", branch = "deadline_logic", package = "web-transport" }
+web-transport-quinn     = { git = "https://github.com/rimmelb/web-transport.git", branch = "deadline_logic", package = "web-transport-quinn" }
+web-transport-proto     = { git = "https://github.com/rimmelb/web-transport.git", branch = "deadline_logic", package = "web-transport-proto" }
+web-transport-trait     = { git = "https://github.com/rimmelb/web-transport.git", branch = "deadline_logic", package = "web-transport-trait" }
 env_logger = "0.11"
 log = { version = "0.4", features = ["std"] }
 

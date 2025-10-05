@@ -1,5 +1,6 @@
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
+use core::time;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
@@ -89,11 +90,11 @@ impl Subscribed {
 
                 // Becsült objektum méret (pl. 500KB video fragment)
                 let estimated_size = 500_000u64;
-                conn.set_deadline(estimated_size, Some(deadline), now);
+                //conn.set_deadline(estimated_size, Some(deadline), now);
         }
     }
 
-        let res = self.serve_inner(track).await;
+        let res = self.serve_inner(track, delivery_timeout_ms).await;
         if let Err(err) = &res {
             self.close(err.clone().into())?;
         }
@@ -101,7 +102,7 @@ impl Subscribed {
         res
     }
 
-    async fn serve_inner(&mut self, track: serve::TrackReader) -> Result<(), SessionError> {
+    async fn serve_inner(&mut self, track: serve::TrackReader, timeout: Option<u64>) -> Result<(), SessionError> {
         let latest = track.latest();
         self.state
             .lock_mut()
@@ -120,7 +121,7 @@ impl Subscribed {
         match track.mode().await? {
             // TODO cancel track/datagrams on closed
             TrackReaderMode::Stream(stream) => self.serve_track(stream).await,
-            TrackReaderMode::Subgroups(subgroups) => self.serve_subgroup(subgroups).await,
+            TrackReaderMode::Subgroups(subgroups) => self.serve_subgroup(subgroups, timeout).await,
             TrackReaderMode::Datagrams(datagrams) => self.serve_datagrams(datagrams).await,
         }
     }
@@ -159,6 +160,7 @@ impl Subscribed {
     async fn serve_subgroup(
         &mut self,
         mut subgroups: serve::SubgroupsReader,
+        timeout: Option<u64>
     ) -> Result<(), SessionError> {
         let mut tasks = FuturesUnordered::new();
         let mut done: Option<Result<(), ServeError>> = None;
@@ -179,7 +181,7 @@ impl Subscribed {
                         let info = subgroup.info.clone();
 
                         tasks.push(async move {
-                            if let Err(err) = Self::serve_one_subgroup(header, subgroup, publisher, state).await {
+                            if let Err(err) = Self::serve_one_subgroup(header, subgroup, publisher, state, timeout).await {
                                 log::warn!("failed to serve group: {:?}, error: {}", info, err);
                             }
                         });
@@ -200,19 +202,24 @@ async fn serve_one_subgroup(
     mut subgroup: serve::SubgroupReader,
     mut publisher: Publisher,
     state: State<SubscribedState>,
+    timeout: Option<u64>,
 ) -> Result<(), SessionError> {
     let sg_group_id = header.group_id;
     let sg_subgroup_id = header.subgroup_id;
     let sg_base_prio = subgroup.priority as i32;
 
-    // ✅ 1. Uni stream nyitás
     let mut stream = publisher.open_uni().await?;
     stream.set_priority(sg_base_prio);
+
+    if let Some(time) = timeout {
+        let now = Instant::now();
+        let deadline = now + Duration::from_millis(time);
+        stream.set_deadline(deadline);
+    }
 
     let bandwidth_estimator = publisher.send_bandwidth_estimator.clone();
     let mut writer = Writer::with_bandwidth_estimator(stream, bandwidth_estimator);
 
-    // ✅ 3. SubgroupHeader küldés (ez még deadline ELŐTT megy)
     let header_msg: data::Header = header.clone().into();
     if let Err(e) = writer.encode(&header_msg).await {
         log::warn!(
@@ -222,7 +229,6 @@ async fn serve_one_subgroup(
         return Ok(());
     }
 
-    // ✅ 4. Objektumok küldése deadline alatt
     while let Some(mut object) = subgroup.next().await? {
         let ob_hdr = data::SubgroupObject {
             object_id: object.object_id,
@@ -237,7 +243,7 @@ async fn serve_one_subgroup(
                 object.object_id
             );
             while let Some(_chunk) = object.read().await? {}
-            let _ = writer.stream.reset(0);
+            let _ = writer.stream.finish();
             return Ok(());
         }
 
@@ -254,7 +260,8 @@ async fn serve_one_subgroup(
                     object.object_id
                 );
                 while let Some(_c) = object.read().await? {}
-                let _ = writer.stream.reset(0);
+                // Abort with non-zero application error code (example 0x100)
+                let _ = writer.stream.reset(0x100);
                 return Ok(());
             }
         }

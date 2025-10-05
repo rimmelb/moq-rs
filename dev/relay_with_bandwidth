@@ -64,7 +64,7 @@ fi
 # Enable bandwidth monitoring
 ARGS="$ARGS --bandwidth-monitoring $BANDWIDTH_INTERVAL"
 
-DELIVERY_TIMEOUT="${DELIVERY_TIMEOUT:-12000}"
+DELIVERY_TIMEOUT="${DELIVERY_TIMEOUT:-2200}"
 
 ARGS="$ARGS --delivery-timeout $DELIVERY_TIMEOUT"
 
