@@ -985,7 +985,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.0",
+ "socket2 0.5.10",
  "system-configuration 0.6.1",
  "tokio",
  "tower-service",
@@ -1267,7 +1267,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "07033963ba89ebaf1584d767badaa2e8fcec21aedea6b8c0346d487d49c28667"
 dependencies = [
  "cfg-if",
- "windows-targets 0.53.4",
+ "windows-targets 0.48.5",
 ]
 
 [[package]]
@@ -1841,7 +1841,7 @@ dependencies = [
 [[package]]
 name = "quinn"
 version = "0.11.9"
-source = "git+https://github.com/rimmelb/quinn.git?branch=unified-0.11.9-qp-0.11.13#aaaee0a37d5c414a00efe7e1eb3a7c5554432bf6"
+source = "git+https://github.com/rimmelb/quinn.git?branch=offset_watcher_drop#429255ae7de13068ae0d0d6ec25367c48b87dbd4"
 dependencies = [
  "bytes",
  "cfg_aliases",
@@ -1850,7 +1850,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls 0.23.32",
- "socket2 0.6.0",
+ "socket2 0.5.10",
  "thiserror 2.0.16",
  "tokio",
  "tracing",
@@ -1860,7 +1860,7 @@ dependencies = [
 [[package]]
 name = "quinn-proto"
 version = "0.11.13"
-source = "git+https://github.com/rimmelb/quinn.git?branch=unified-0.11.9-qp-0.11.13#aaaee0a37d5c414a00efe7e1eb3a7c5554432bf6"
+source = "git+https://github.com/rimmelb/quinn.git?branch=offset_watcher_drop#429255ae7de13068ae0d0d6ec25367c48b87dbd4"
 dependencies = [
  "aws-lc-rs",
  "bytes",
@@ -1883,12 +1883,12 @@ dependencies = [
 [[package]]
 name = "quinn-udp"
 version = "0.5.14"
-source = "git+https://github.com/rimmelb/quinn.git?branch=unified-0.11.9-qp-0.11.13#aaaee0a37d5c414a00efe7e1eb3a7c5554432bf6"
+source = "git+https://github.com/rimmelb/quinn.git?branch=offset_watcher_drop#429255ae7de13068ae0d0d6ec25367c48b87dbd4"
 dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.0",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.60.2",
 ]
@@ -3162,7 +3162,7 @@ dependencies = [
 [[package]]
 name = "web-transport"
 version = "0.9.6"
-source = "git+https://github.com/rimmelb/web-transport.git?branch=deadline_logic#6400ca8cbb595cbd51283f2c46e8213f6cd04eee"
+source = "git+https://github.com/rimmelb/web-transport.git?branch=deadline_logic#715865e61698496373c62b06df3e23916b137d0f"
 dependencies = [
  "bytes",
  "thiserror 2.0.16",
@@ -3174,7 +3174,7 @@ dependencies = [
 [[package]]
 name = "web-transport-proto"
 version = "0.2.7"
-source = "git+https://github.com/rimmelb/web-transport.git?branch=deadline_logic#6400ca8cbb595cbd51283f2c46e8213f6cd04eee"
+source = "git+https://github.com/rimmelb/web-transport.git?branch=deadline_logic#715865e61698496373c62b06df3e23916b137d0f"
 dependencies = [
  "bytes",
  "http 1.3.1",
@@ -3185,7 +3185,7 @@ dependencies = [
 [[package]]
 name = "web-transport-quinn"
 version = "0.8.1"
-source = "git+https://github.com/rimmelb/web-transport.git?branch=deadline_logic#6400ca8cbb595cbd51283f2c46e8213f6cd04eee"
+source = "git+https://github.com/rimmelb/web-transport.git?branch=deadline_logic#715865e61698496373c62b06df3e23916b137d0f"
 dependencies = [
  "bytes",
  "futures",
@@ -3204,7 +3204,7 @@ dependencies = [
 [[package]]
 name = "web-transport-trait"
 version = "0.1.1"
-source = "git+https://github.com/rimmelb/web-transport.git?branch=deadline_logic#6400ca8cbb595cbd51283f2c46e8213f6cd04eee"
+source = "git+https://github.com/rimmelb/web-transport.git?branch=deadline_logic#715865e61698496373c62b06df3e23916b137d0f"
 dependencies = [
  "bytes",
 ]
@@ -3212,7 +3212,7 @@ dependencies = [
 [[package]]
 name = "web-transport-wasm"
 version = "0.5.2"
-source = "git+https://github.com/rimmelb/web-transport.git?branch=deadline_logic#6400ca8cbb595cbd51283f2c46e8213f6cd04eee"
+source = "git+https://github.com/rimmelb/web-transport.git?branch=deadline_logic#715865e61698496373c62b06df3e23916b137d0f"
 dependencies = [
  "bytes",
  "js-sys",
@@ -3258,7 +3258,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.1",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

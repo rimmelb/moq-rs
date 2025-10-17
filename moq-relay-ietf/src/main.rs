@@ -58,7 +58,7 @@ pub struct Cli {
 
     /// Set a global rate limit in bits per second
     #[arg(long)]
-    pub rate_limit_bps: Option<u32>,
+    pub rate_limit_mbps: Option<u32>,
 
     /// Initial RTT hint in milliseconds for QUIC transport
     #[arg(long, value_name="MS")]
@@ -97,18 +97,13 @@ async fn main() -> anyhow::Result<()> {
             api: cli.api,
             announce: cli.announce,
             bandwidth_monitoring: cli.bandwidth_monitoring,
-            rate_limit_bps: cli.rate_limit_bps,
+            rate_limit_bps: cli.rate_limit_mbps,
             rtt_ms: cli.initial_rtt_ms,
             delivery_timeout: cli.delivery_timeout
         },
         shared_state.clone(),
         relay_stopping_state.clone(),
     )?;
-
-    if let Some(rate) = cli.rate_limit_bps {
-        let rate = rate as f64;
-        log::info!("Global rate limit enabled: {:.0} bps ({:.2} Mbps)", rate, rate / 1_000_000.0);
-    }
 
     if cli.dev {
         // Create a web server too.

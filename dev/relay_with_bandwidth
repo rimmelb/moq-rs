@@ -37,15 +37,14 @@ fi
 ARGS=""
 
 # Rate limiting environment variables
-RELAY_RATE_LIMIT_MBPS=${RELAY_RATE_LIMIT_MBPS:-"10"}
+RELAY_RATE_LIMIT_MBPS=${RELAY_RATE_LIMIT_MBPS:-"100000"}
 
-if [ ! -z "$RELAY_RATE_LIMIT_MBPS" ]; then
-    RELAY_RATE_LIMIT_BPS=$(echo "$RELAY_RATE_LIMIT_MBPS * 1000000" | bc -l | cut -d. -f1)
-    ARGS="$ARGS --rate-limit-bps $RELAY_RATE_LIMIT_BPS"
-    echo "📉 Relay rate limit: ${RELAY_RATE_LIMIT_MBPS} Mbps (${RELAY_RATE_LIMIT_BPS} bps)"
+if [ -n "$RELAY_RATE_LIMIT_MBPS" ]; then
+    ARGS="$ARGS --rate-limit-mbps $RELAY_RATE_LIMIT_MBPS"
+    echo "📉 Relay rate limit: ${RELAY_RATE_LIMIT_MBPS} Mbps"
 fi
 
-INITIAL_RTT_MS="${INITIAL_RTT_MS:-50}"  # e.g., 50
+INITIAL_RTT_MS="${INITIAL_RTT_MS:-100}"  # e.g., 50
 
 if [ -n "${INITIAL_RTT_MS}" ]; then
   ARGS="$ARGS --initial-rtt-ms ${INITIAL_RTT_MS}"
@@ -64,7 +63,7 @@ fi
 # Enable bandwidth monitoring
 ARGS="$ARGS --bandwidth-monitoring $BANDWIDTH_INTERVAL"
 
-DELIVERY_TIMEOUT="${DELIVERY_TIMEOUT:-30}"
+DELIVERY_TIMEOUT="${DELIVERY_TIMEOUT:-20}"
 
 ARGS="$ARGS --delivery-timeout $DELIVERY_TIMEOUT"
 

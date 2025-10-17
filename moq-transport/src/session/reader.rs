@@ -46,8 +46,6 @@ impl Reader {
                 Err(DecodeError::More(required)) => self.buffer.len() + required,
                 Err(err) => return Err(err.into()),
             };
-
-            // Töltsd a pufferbe, amíg el nem érjük a szükséges méretet vagy EOF
             loop {
                 match self.stream.read_buf(&mut self.buffer).await? {
                     Some(n) => {
@@ -61,7 +59,6 @@ impl Reader {
                         }
                     }
                     None => {
-                        // többet nem kapunk, jelezd, hogy több kellene
                         return Err(DecodeError::More(required - self.buffer.len()).into());
                     }
                 }

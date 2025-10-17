@@ -27,11 +27,11 @@ fn init_tracing() {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| {
             // Alapértelmezett: bbr.deadline=debug, Quinn csak warn
-            "bbr.deadline=debug,moq_transport=info,quinn=warn,moq_native_ietf=info".parse().unwrap()
+            "bbr.sg=debug,moq_transport=info,quinn=warn,moq_native_ietf=info".parse().unwrap()
         });
 
     let fmt_layer = fmt::layer()
-        .with_target(true)      // mutassa a "bbr.deadline" targetet
+        .with_target(true)
         .with_thread_ids(false)
         .with_level(true)
         .with_ansi(false)       // szint is látszódjon
@@ -88,7 +88,6 @@ pub struct Cli {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     init_tracing();
-
     let mut cli = Cli::parse();
     let mut url = cli.url.clone();
     let (writer, _, reader) =
@@ -145,8 +144,6 @@ async fn run_media(media: Arc<Mutex<Media>>) -> anyhow::Result<()> {
             .context("failed to parse media")?;
     }
 }
-
-//ITT LEHET ÁLLÍTANI A RTT-ÉRTÉKET
 
 async fn connect_to_other_session(cli: Cli, mut url: Url, r: TracksReader) -> anyhow::Result<Url> {
     loop {
@@ -208,7 +205,7 @@ async fn connect_to_other_session(cli: Cli, mut url: Url, r: TracksReader) -> an
             Err(e) => {
                 log::error!("Error occurred: {}. Retrying...", e);
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                continue; // RECURSION helyett retry loop
+                continue;
             }
         }
     }

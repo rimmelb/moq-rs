@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use crate::coding::{Decode, DecodeError, Encode, EncodeError};
 use crate::data::ObjectStatus;
 
@@ -48,26 +50,21 @@ pub struct SubgroupObject {
     pub object_id: u64,
     pub size: usize,
     pub status: ObjectStatus,
+    pub deadline: u64
 }
 
 impl Decode for SubgroupObject {
     fn decode<R: bytes::Buf>(r: &mut R) -> Result<Self, DecodeError> {
         let object_id = u64::decode(r)?;
         let size = usize::decode(r)?;
-
-        // If the size is 0, then the status is sent explicitly.
-        // Otherwise, the status is assumed to be 0x0 (Object).
         let status = if size == 0 {
             ObjectStatus::decode(r)?
         } else {
             ObjectStatus::Object
         };
+        let deadline= u64::decode(r)?;
 
-        Ok(Self {
-            object_id,
-            size,
-            status,
-        })
+        Ok(Self { object_id, size, status, deadline })
     }
 }
 
@@ -75,13 +72,10 @@ impl Encode for SubgroupObject {
     fn encode<W: bytes::BufMut>(&self, w: &mut W) -> Result<(), EncodeError> {
         self.object_id.encode(w)?;
         self.size.encode(w)?;
-
-        // If the size is 0, then the status is sent explicitly.
-        // Otherwise, the status is assumed to be 0x0 (Object).
         if self.size == 0 {
             self.status.encode(w)?;
         }
-
+        self.deadline.encode(w)?;
         Ok(())
     }
 }

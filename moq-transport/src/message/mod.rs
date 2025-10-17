@@ -60,6 +60,7 @@ mod track_status_request;
 mod unannounce;
 mod unsubscribe;
 mod unsubscribe_namespace;
+mod fix_bandwidth;
 
 pub use announce::*;
 pub use announce_cancel::*;
@@ -75,6 +76,7 @@ pub use group_order::*;
 pub use max_subscribe_id::*;
 pub use publisher::*;
 pub use relay::*;
+pub use fix_bandwidth::*;
 pub use subscribe::*;
 pub use subscribe_done::*;
 pub use subscribe_error::*;
@@ -212,6 +214,7 @@ message_types! {
 
     // Misc
     GoAway = 0x10,
+    FixBandwidth=0x20,
 
     // NAMESPACE family, sent by subscriber
     SubscribeNamespace = 0x11,

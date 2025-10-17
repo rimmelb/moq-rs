@@ -91,11 +91,15 @@ impl Session {
         let recv_estimator = Arc::new(TokioMutex::new(BandwidthEstimator::with_cross_layer()));
         let send_estimator = Arc::new(TokioMutex::new(BandwidthEstimator::with_cross_layer()));
 
-        // kontrollcsatorna Writer-e NEM kap limiter-t
-        // sender.set_rate_limiter(...); // TÖRÖLVE
-
         // közös deadline handle
         let deadline_scheduler = Arc::new(TokioMutex::new(None));
+
+        // ÚJ: közös rate limit tároló a Publisher számára
+        log::debug!("{:?} 3 fasz", _rate_limit_bps);
+        let rate_limit_mbps = Arc::new(std::sync::atomic::AtomicU32::new(
+                _rate_limit_bps.unwrap_or(0.0) as u32
+            ));
+
 
         // építs Publisher/Subscriber
         let (publisher, subscriber) = match role {
@@ -104,8 +108,7 @@ impl Session {
                     outgoing_send.clone(),
                     webtransport.clone(),
                     send_estimator.clone(),
-                    None, // app rate limit off
-                    // TÖRÖLVE: rate_limiter
+                    rate_limit_mbps.clone(),
                     deadline_scheduler.clone(),
                     stats.clone(),
                 ));
@@ -116,7 +119,6 @@ impl Session {
                 (None, subscriber)
             }
         };
-
         let session = Session {
             webtransport,
             sender: Arc::new(TokioMutex::new(sender)),
@@ -126,9 +128,7 @@ impl Session {
             outgoing: outgoing_recv,
             recv_bandwidth_estimator: recv_estimator,
             send_bandwidth_estimator: send_estimator,
-            // FONTOS: ne dobd el a provider-t
             quic_stats_provider: stats.clone(),
-            // TÖRÖLVE: send_rate_limit_bps, send_rate_limiter
             deadline_scheduler,
         };
 
@@ -173,8 +173,8 @@ impl Session {
         let recv_estimator = Arc::new(TokioMutex::new(BandwidthEstimator::with_cross_layer()));
         let send_estimator = Arc::new(TokioMutex::new(BandwidthEstimator::with_cross_layer()));
 
-        let mut sender = Writer::with_bandwidth_estimator(control.0, send_estimator.clone());
-        let mut recver = Reader::with_bandwidth_estimator(control.1, recv_estimator.clone());
+        let mut sender = Writer::new(control.0);
+        let mut recver = Reader::new(control.1);
 
         let versions: setup::Versions = [setup::Version::DRAFT_07].into();
 
@@ -227,8 +227,8 @@ impl Session {
         let recv_estimator = Arc::new(TokioMutex::new(BandwidthEstimator::with_cross_layer()));
         let send_estimator = Arc::new(TokioMutex::new(BandwidthEstimator::with_cross_layer()));
 
-        let mut sender = Writer::with_bandwidth_estimator(control.0, send_estimator.clone());
-        let mut recver = Reader::with_bandwidth_estimator(control.1, recv_estimator.clone());
+        let mut sender = Writer::new(control.0);
+        let mut recver = Reader::new(control.1);
 
         let client: setup::Client = recver.decode().await?;
         log::debug!("received client SETUP: {:?}", client);
@@ -276,8 +276,8 @@ impl Session {
         let recv_estimator = Arc::new(TokioMutex::new(BandwidthEstimator::with_cross_layer()));
         let send_estimator = Arc::new(TokioMutex::new(BandwidthEstimator::with_cross_layer()));
 
-        let mut sender = Writer::with_bandwidth_estimator(control.0, send_estimator.clone());
-        let mut recver = Reader::with_bandwidth_estimator(control.1, recv_estimator.clone());
+        let mut sender = Writer::new(control.0);
+        let mut recver = Reader::new(control.1);
 
         let client: setup::Client = recver.decode().await?;
         log::debug!("received client SETUP: {:?}", client);
@@ -329,16 +329,15 @@ impl Session {
         mut session: web_transport::Session,
         role: setup::Role,
         stats: Option<Arc<dyn QuicStatsProvider + Send + Sync>>,
-        rate_limit_bps: Option<f64>,
+        rate_limit_mbps: Option<f64>,
     ) -> Result<(Session, Option<Publisher>, Option<Subscriber>), SessionError> {
         let control = session.open_bi().await?;
 
         let recv_estimator = Arc::new(TokioMutex::new(BandwidthEstimator::with_cross_layer()));
         let send_estimator = Arc::new(TokioMutex::new(BandwidthEstimator::with_cross_layer()));
 
-        // TÖRÖLVE: ctrl_limiter
-        let mut sender = Writer::with_bandwidth_estimator(control.0, send_estimator.clone());
-        let mut recver = Reader::with_bandwidth_estimator(control.1, recv_estimator.clone());
+        let mut sender = Writer::new(control.0);
+        let mut recver = Reader::new(control.1);
 
         let versions: setup::Versions = [setup::Version::DRAFT_07].into();
 
@@ -370,22 +369,10 @@ impl Session {
             },
         };
 
+        log::debug!("{:?} 2 fasz", rate_limit_mbps);
+
         // Biztosítsd, hogy a rate_limit_bps átkerül a Session::new-be
-        let (mut session, pubr, subr) = Session::new(session, sender, recver, role, rate_limit_bps, stats);
-
-        // Rate limit debug log
-        if let Some(rate) = rate_limit_bps {
-            log::info!("🚦 Rate limit applied: {:.0} bps ({:.2} Mbps)", rate, rate / 1_000_000.0);
-
-            // Ellenőrizd, hogy a Publisher tényleg megkapja-e
-            if let Some(ref publisher) = pubr {
-                if let Some(pub_rate) = publisher.get_rate_limit_bps() {
-                    log::info!("✅ Publisher rate limit confirmed: {:.0} bps", pub_rate);
-                } else {
-                    log::warn!("❌ Publisher rate limit NOT set!");
-                }
-            }
-        }
+        let (mut session, pubr, subr) = Session::new(session, sender, recver, role, rate_limit_mbps, stats);
 
         Ok((session, pubr, subr))
     }
@@ -420,61 +407,26 @@ impl Session {
         estimator.bandwidth_mbps()
     }
 
-    /// Másold át a session szintű küldési limitet a Publisher-be és a limiterbe is.
-    pub fn apply_send_rate_limit_to_publisher(&mut self) {
-        // App-szintű limiter eltávolítva: no-op
-        log::debug!("(no-op) apply_send_rate_limit_to_publisher");
-    }
-
     pub async fn run(self, shared_state: SharedState) -> Result<(), SessionError> {
         let sender = self.sender.clone();
         let shared_state_clone = shared_state.clone();
         let mut this = self;
 
-        // CLONES PER TASK
         let recv_bw_estimator = this.recv_bandwidth_estimator.clone();
         let send_bw_estimator = this.send_bandwidth_estimator.clone();
-        // let send_rate_limiter = this.send_rate_limiter.clone(); // TÖRÖLVE
         let send_bw_estimator_for_watcher = send_bw_estimator.clone();
         let recv_bw_estimator_for_monitor = recv_bw_estimator.clone();
         let send_bw_estimator_for_monitor = send_bw_estimator.clone();
         let deadline_cfg_handle = this.deadline_scheduler.clone();
+        let publisher_for_watcher = this.publisher.clone();
 
-        let rate_limit_watcher = async move {
-            loop {
-                shared_state_clone.wait_for_change().await;
-
-                if let Some(bps) = shared_state_clone.get_rate_limit_bps() {
-                    // App limiter nincs; csak az estimator reset
-                    let mut est = send_bw_estimator_for_watcher.lock().await;
-                    est.reset();
-                    log::info!(
-                        "Dynamic rate limit updated (transport-only): {} bps ({:.2} Mbps)",
-                        bps,
-                        (bps as f64) / 1_000_000.0
-                    );
-                }
-
-                if let Some(cfg) = shared_state_clone.get_deadline_scheduler() {
-                    let mut h = deadline_cfg_handle.lock().await;
-                    *h = Some(cfg.clone());
-                    log::info!(
-                        "Deadline scheduler updated: enabled={} mode={:?} guard={}ms beta={:.2}",
-                        cfg.enabled,
-                        cfg.mode,
-                        cfg.guard_ms,
-                        cfg.beta
-                    );
-                }
-            }
-        };
 
         tokio::select! {
             res = Self::run_recv(this.recver, this.publisher, this.subscriber.clone()) => res,
             res = Self::run_send(this.sender, this.outgoing) => res,
             res = Self::run_streams(this.webtransport.clone(), this.subscriber.clone(), this.recv_bandwidth_estimator.clone()) => res,
             res = Self::run_datagrams(this.webtransport, this.subscriber) => res,
-            _ = rate_limit_watcher => Ok(()),
+            res = Self::bandwidth_message_send_loop(sender.clone(), shared_state_clone.clone()) => Ok(()),
         }
     }
 
@@ -495,6 +447,31 @@ impl Session {
         .await;
         Err(SessionError::GoawayTimeout(OfficialError::GoawayTimeout))
     }
+
+    async fn bandwidth_message_send_loop(
+        sender: Arc<TokioMutex<Writer>>,
+        shared_state: SharedState,
+    ) -> Result<(), SessionError> {
+        {
+            let bps = shared_state.get_rate_limit_bps().unwrap_or(0);
+            let msg = message::Message::FixBandwidth(message::FixBandwidth { bandwidth: bps });
+            let mut w = sender.lock().await;
+            w.encode(&msg).await?;
+            log::debug!("FixBandwidth sent (initial): {} bps ({:.2} Mbps)", bps, (bps as f64)/1_000_000.0);
+        }
+
+        loop {
+            shared_state.wait_for_rate_limit_change().await;
+
+            let bps = shared_state.get_rate_limit_bps().unwrap_or(0);
+            let msg = message::Message::FixBandwidth(message::FixBandwidth { bandwidth: bps });
+
+            let mut w = sender.lock().await;
+            w.encode(&msg).await?;
+            log::debug!("FixBandwidth sent (update): {} bps ({:.2} Mbps)", bps, (bps as f64)/1_000_000.0);
+        }
+    }
+
 
     async fn run_send(
         // FIX: TokioMutex
@@ -524,7 +501,7 @@ impl Session {
                 });
                 let mut sender = sender.lock().await;
                 sender.encode(&msg).await?;
-                break; // egy GOAWAY elküldve, kilépünk
+                break;
             } else {
                 log::debug!("SharedState changed without GOAWAY url; skipping send");
             }
@@ -586,7 +563,6 @@ impl Session {
     async fn run_streams(
         mut webtransport: web_transport::Session,
         subscriber: Option<Subscriber>,
-        // FIX: TokioMutex
         recv_bandwidth_estimator: Arc<TokioMutex<crate::util::BandwidthEstimator>>,
     ) -> Result<(), SessionError> {
         let mut tasks = FuturesUnordered::new();
@@ -594,17 +570,24 @@ impl Session {
         loop {
             tokio::select! {
                 res = webtransport.accept_uni() => {
-                    let stream = res?;
-                    let subscriber = subscriber.clone().ok_or(SessionError::RoleViolation)?;
-                    let bandwidth_estimator = recv_bandwidth_estimator.clone();
+                    match res {
+                        Ok(stream) => {
+                            let subscriber = subscriber.clone().ok_or(SessionError::RoleViolation)?;
+                            let bandwidth_estimator = recv_bandwidth_estimator.clone();
 
-                    tasks.push(async move {
-                        if let Err(err) = Subscriber::recv_stream_with_bandwidth(subscriber, stream, bandwidth_estimator).await {
-                            log::warn!("failed to serve stream: {}", err);
-                        };
-                    });
+                            tasks.push(async move {
+                                if let Err(err) = Subscriber::recv_stream_with_bandwidth(subscriber, stream, bandwidth_estimator).await {
+                                    log::warn!("failed to serve stream: {}", err);
+                                };
+                            });
+                        }
+                        Err(e) => {
+                            log::debug!("accept_uni ended: {}; treating as graceful stop", e);
+                            return Ok(());
+                        }
+                    }
                 },
-                _ = tasks.next(), if !tasks.is_empty() => {} ,
+                _ = tasks.next(), if !tasks.is_empty() => {},
             };
         }
     }

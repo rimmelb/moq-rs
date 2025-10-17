@@ -1,6 +1,6 @@
 use std::{
     collections::{hash_map, HashMap},
-    sync::{Arc, Mutex},
+    sync::{atomic::AtomicU32, atomic::Ordering, Arc, Mutex},
 };
 
 use futures::{stream::FuturesUnordered, StreamExt};
@@ -24,17 +24,17 @@ use super::{
 #[derive(Clone)]
 pub struct Publisher {
     webtransport: web_transport::Session,
-    announces: Arc<Mutex<HashMap<Tuple, AnnounceRecv>>>,
-    subscribed: Arc<Mutex<HashMap<u64, SubscribedRecv>>>,
-    unknown: Queue<Subscribed>,
-    outgoing: Queue<Message>,
+    announces: Arc<Mutex<HashMap<Tuple, AnnounceRecv>>>, // Tuple: namespace
+    subscribed: Arc<Mutex<HashMap<u64, SubscribedRecv>>>, // u64: subscription ID
+    unknown: Queue<Subscribed>, // Subscriptions without a known announce
+    outgoing: Queue<Message>, // Outgoing messages queue
     url: Arc<Mutex<String>>,
 
     // Bandwidth estimators for outgoing data streams
     pub send_bandwidth_estimator: Arc<TokioMutex<BandwidthEstimator>>,
 
-    // Rate limit for all outgoing streams
-    pub rate_limit_bps: Option<f64>,
+    // Rate limit for all outgoing streams (bps, u32)
+    pub rate_limit_mbps: Arc<AtomicU32>,
 
     // ÚJ: deadline ütemező konfiguráció
     deadline_scheduler: Arc<TokioMutex<Option<crate::session::DeadlineSchedulerConfig>>>,
@@ -54,7 +54,7 @@ impl Publisher {
             outgoing,
             url: Arc::new(Mutex::new(String::new())),
             send_bandwidth_estimator: Arc::new(TokioMutex::new(BandwidthEstimator::with_cross_layer())),
-            rate_limit_bps: None,
+            rate_limit_mbps: Arc::new(AtomicU32::new(0)),
             deadline_scheduler: Arc::new(TokioMutex::new(None)),
             stats: None,
         }
@@ -64,13 +64,10 @@ impl Publisher {
         outgoing: Queue<Message>,
         webtransport: web_transport::Session,
         send_bandwidth_estimator: Arc<TokioMutex<BandwidthEstimator>>,
-        rate_limit_bps: Option<f64>,
+        rate_limit_mbps: Arc<AtomicU32>,
         deadline_scheduler: Arc<TokioMutex<Option<crate::session::DeadlineSchedulerConfig>>>,
         stats: Option<Arc<dyn super::QuicStatsProvider + Send + Sync>>,
     ) -> Self {
-        if let Some(rate) = rate_limit_bps {
-            log::info!("Publisher created with rate limit: {:.0} bps ({:.2} Mbps)", rate, rate / 1_000_000.0);
-        }
         Self {
             webtransport,
             announces: Default::default(),
@@ -79,7 +76,7 @@ impl Publisher {
             outgoing,
             url: Arc::new(Mutex::new(String::new())),
             send_bandwidth_estimator,
-            rate_limit_bps,
+            rate_limit_mbps,
             deadline_scheduler,
             stats,
         }
@@ -89,13 +86,35 @@ impl Publisher {
         self.deadline_scheduler.clone()
     }
 
-    pub fn get_rate_limit_bps(&self) -> Option<f64> {
-        self.rate_limit_bps
+    pub fn get_rate_limit_mpbs(&self) -> Option<f64> {
+        let v = self.rate_limit_mbps.load(Ordering::Relaxed);
+        if v == 0 { None } else { Some(v as f64) }
+    }
+
+    pub fn set_rate_limit_mpbs(&mut self, bps: Option<u64>) {
+        let v32: u32 = bps.unwrap_or(0).min(u64::from(u32::MAX)) as u32;
+        self.rate_limit_mbps.store(v32, Ordering::Relaxed);
+        if v32 == 0 {
+            log::info!("Publisher rate limit disabled");
+        } else {
+            log::info!(
+                "Publisher rate limit set: {} bps ({:.2} Mbps)",
+                v32,
+                (v32 as f64)/1_000_000.0
+            );
+        }
     }
 
     // adj egy connection() segédfüggvényt
     pub fn connection(&self) -> Option<quinn::Connection> {
         self.stats.as_ref().map(|p| p.get_connection())
+    }
+
+    pub fn set_bandwidth(&self, bandwidth: Option<u32>) {
+        let connection = self.stats.as_ref().map(|p| p.get_connection());
+        if let Some(conn) = connection {
+            conn.alter_fix_bandwidth(bandwidth);
+        }
     }
 
     pub async fn accept(
@@ -125,7 +144,7 @@ impl Publisher {
     pub async fn connect_with_stats_and_rate_limit(
         session: web_transport::Session,
         stats: Option<Arc<dyn super::QuicStatsProvider + Send + Sync>>,
-        rate_limit_bps: Option<f64>,
+        rate_limit: Option<f64>,
 
     ) -> Result<(Session, Self), SessionError> {
         let (session, publisher, _) =
@@ -133,7 +152,7 @@ impl Publisher {
                 session,
                 setup::Role::Publisher,
                 stats,
-                rate_limit_bps,
+                rate_limit,
             ).await?;
         Ok((session, publisher.unwrap()))
     }
@@ -206,7 +225,28 @@ impl Publisher {
         mut tracks: TracksReader,
     ) -> Result<(), SessionError> {
         if let Some(track) = tracks.subscribe(&subscribe.info.name) {
-            subscribe.serve(track).await?;
+            let info = subscribe.info.clone();
+            if let Err(err) = subscribe.serve(track).await {
+                match err {
+                    SessionError::Serve(ServeError::Cancel) => {
+                        log::debug!("subscription {:?} cancelled by peer; treating as drop", info);
+                        return Ok(());
+                    }
+                    SessionError::Serve(ServeError::Done) => {
+                        log::debug!("subscription {:?} completed; treating as graceful stop", info);
+                        return Ok(());
+                    }
+                    SessionError::Serve(ServeError::Closed(code)) => {
+                        log::debug!(
+                            "subscription {:?} closed by peer (code={}): treating as drop",
+                            info,
+                            code
+                        );
+                        return Ok(());
+                    }
+                    other => return Ok(()),
+                }
+            }
         } else {
             subscribe.close(ServeError::NotFound)?;
         }
@@ -282,10 +322,16 @@ impl Publisher {
         log::info!("Megkapja-e ezt?: {:?}", msg);
         let res = match msg {
             message::Relay::GoAway(msg) => self.recv_goaway_message(msg).await,
+            message::Relay::FixBandwidth(msg) => self.recv_bandwidth(msg).await,
         };
         if let Err(err) = res {
             log::warn!("failed to process message: {}", err);
         }
+        Ok(())
+    }
+
+    pub async fn recv_bandwidth(&mut self, msg: message::FixBandwidth) -> Result<(), SessionError> {
+        self.set_rate_limit_mpbs(Some(msg.bandwidth));
         Ok(())
     }
 

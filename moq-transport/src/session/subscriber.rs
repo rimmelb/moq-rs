@@ -16,6 +16,8 @@ use crate::watch::Queue;
 
 use super::{Announced, AnnouncedRecv, Reader, Session, SessionError, Subscribe, SubscribeRecv};
 
+const DEADLINE_THRESHOLD_MS: u64 = 15;
+
 // TODO remove Clone.
 #[derive(Clone)]
 pub struct Subscriber {
@@ -129,6 +131,7 @@ impl Subscriber {
     pub async fn recv_goaway(&mut self, msg: message::Relay) -> Result<(), SessionError> {
         let res = match &msg {
             message::Relay::GoAway(msg) => self.recv_goaway_message(msg).await,
+            message::Relay::FixBandwidth(msg) => Ok(()),
         };
         if let Err(SessionError::Serve(err)) = res {
             log::debug!("failed to process message: {:?} {}", msg, err);
@@ -252,18 +255,42 @@ impl Subscriber {
         bandwidth_estimator: std::sync::Arc<tokio::sync::Mutex<crate::util::BandwidthEstimator>>,
     ) -> Result<(), SessionError> {
         let mut reader = Reader::with_bandwidth_estimator(stream, bandwidth_estimator);
-        let header: data::Header = reader.decode().await?;
+        let header: data::Header = match reader.decode().await {
+            Ok(header) => header,
+            Err(SessionError::Decode(crate::coding::DecodeError::More(_))) => {
+                log::debug!(
+                    "data stream ended before header could be decoded; treating as soft drop"
+                );
+                return Ok(());
+            }
+            Err(SessionError::Decode(crate::coding::DecodeError::Io(err))) => {
+                log::debug!(
+                    "data stream I/O error before header could be decoded: {}; treating as drop",
+                    err
+                );
+                return Ok(());
+            }
+            Err(SessionError::Transport(err)) => {
+                log::debug!(
+                    "data stream reset before header could be decoded: {}; ignoring",
+                    err
+                );
+                return Ok(());
+            }
+            Err(err) => return Err(err),
+        };
         let id = header.subscribe_id();
 
         let res = self.recv_stream_inner(reader, header).await;
 
         match &res {
-            // NE zárjuk le a teljes Subscribe-ot egyetlen stream Cancel miatt
             Err(SessionError::Serve(ServeError::Cancel)) => {
-                //log::debug!("stream for subscribe id={} cancelled; keeping subscription open", id);
                 return Ok(());
             }
-            // Végzetes hiba: ilyenkor lezárjuk a Subscribe-ot
+            Err(SessionError::Transport(e)) => {
+                log::debug!("data stream for subscribe id={} reset by peer: {}; ignoring", id, e);
+                return Ok(());
+            }
             Err(SessionError::Serve(err)) => {
                 if let Some(subscribe) = self.subscribes.lock().unwrap().remove(&id) {
                     subscribe.error(err.clone())?;
@@ -332,8 +359,6 @@ impl Subscriber {
                         object.write(bytes)?;
                     }
                     None => {
-                        // Truncate: a peer leállította a streamet (STOP_SENDING) vagy idő előtt EOF
-                        // Kezeljük úgy, mintha az objektumot eldobtuk volna; ne döntsük el a subscription-t.
                         log::debug!("recv_track: truncated object (g={}, remain={}B), dropping object and continuing",
                             chunk.group_id, remain);
                         // következő objektumra lépünk
@@ -343,7 +368,9 @@ impl Subscriber {
             }
             prev = Some(group);
         }
+
         Ok(())
+
     }
 
     async fn recv_subgroup(
@@ -352,25 +379,101 @@ impl Subscriber {
     ) -> Result<(), SessionError> {
         log::trace!("received subgroup: {:?}", group.info);
 
-        while !reader.done().await? {
-            let hdr: data::SubgroupObject = reader.decode().await?;
+         while !reader.done().await? {
+            let hdr: data::SubgroupObject = match reader.decode().await {
+                Ok(h) => h,
+                Err(e) => {
+                    log::debug!("recv_subgroup: failed to decode object header: {e}; ending subgroup");
+                    return Ok(());
+                }
+            };
+
             let mut object = group.create(hdr.size)?;
 
             let mut remain = hdr.size;
-            while remain > 0 {
-                match reader.read_chunk(remain).await? {
-                    Some(bytes) => {
-                        remain -= bytes.len();
-                        object.write(bytes)?;
+            let mut write_failed = false;
+
+            // ÚJ: deadline kibontása
+            let deadline_ms = hdr.deadline;
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+
+            let remaining_ms = if now_ms > deadline_ms {
+                now_ms - deadline_ms
+            } else {
+                0 // már lejárt
+            };
+
+            if remaining_ms > DEADLINE_THRESHOLD_MS {
+            log::warn!(
+                "recv_subgroup: object deadline too close (remaining={}ms < threshold={}ms), dropping without reading. size={}B",
+                remaining_ms,
+                DEADLINE_THRESHOLD_MS,
+                hdr.size
+            );
+            // Drain az objektum adatait a stream-ből (de nem írjuk a kimenetre)
+            let mut to_drain = hdr.size;
+            while to_drain > 0 {
+                match reader.read_chunk(to_drain).await {
+                    Ok(Some(bytes)) => to_drain -= bytes.len(),
+                    Ok(None) => {
+                        log::debug!("recv_subgroup: stream ended while draining deadline-exceeded object");
+                        return Ok(());
                     }
-                    None => {
-                        log::debug!(
-                            "recv_subgroup: truncated object (g={}, remain={}B), dropping",
-                            group.group_id, remain
-                        );
+                    Err(e) => {
+                        log::debug!("recv_subgroup: error while draining deadline-exceeded object: {e}");
                         return Ok(());
                     }
                 }
+            }
+            // Ugrás a következő objektumra
+            continue;
+            }
+
+            while remain > 0 {
+                match reader.read_chunk(remain).await {
+                    Ok(Some(bytes)) => {
+                        remain -= bytes.len();
+                        if let Err(e) = object.write(bytes) {
+                            log::warn!("recv_subgroup: write failed (remain={}B): {e}; draining rest", remain);
+                            write_failed = true;
+                            break;
+                        }
+                    }
+                    Ok(None) => {
+                        // EOF/truncation
+                        log::debug!("recv_subgroup: truncated object (remain={}B), draining", remain);
+                        write_failed = true;
+                        break;
+                    }
+                    Err(err) => {
+                        // Transport reset
+                        log::debug!("recv_subgroup: transport error: {err}; draining rest");
+                        write_failed = true;
+                        break;
+                    }
+                }
+            }
+
+            if write_failed {
+                // Drain fennmaradó bájtokat, hogy a következő objektum header helyes pozícióban legyen
+                while remain > 0 {
+                    match reader.read_chunk(remain).await {
+                        Ok(Some(bytes)) => remain -= bytes.len(),
+                        Ok(None) => {
+                            log::debug!("recv_subgroup: stream ended while draining failed object");
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            log::debug!("recv_subgroup: error while draining: {e}");
+                            return Ok(());
+                        }
+                    }
+                }
+                // NE térj vissza! Menj a következő objektumra
+                continue;
             }
         }
 

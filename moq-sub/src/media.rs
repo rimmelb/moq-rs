@@ -49,7 +49,7 @@ impl<O: AsyncWrite + Send + Unpin + 'static> Media<O> {
         let mut last_group: Option<u64> = None;
 
         while let Some(object) = group.next().await? {
-            let g = object.group_id;
+            let g = object.object_id;
             let declared = object.size;
             let mut buf = Vec::with_capacity(declared);
             let mut read_total = 0usize;
@@ -84,45 +84,57 @@ impl<O: AsyncWrite + Send + Unpin + 'static> Media<O> {
                 continue;
             }
 
+            // buf: a teljes objektum bájtjai
+            // Gyors detektálás: egy objektumban moof+mdat egymás után?
+            let mut wrote_combined = false;
+            if buf.len() >= 16 {
+                let size1 = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+                let is_moof = &buf[4..8] == b"moof";
+                if is_moof && buf.len() >= size1 + 8 {
+                    let is_mdat = &buf[size1 + 4..size1 + 8] == b"mdat";
+                    if is_mdat {
+                        // Egy objektumban jött a moof+mdat → írd ki egyben
+                        out.lock().await.write_all(&buf).await?;
+                        wrote_combined = true;
+                    }
+                }
+            }
+            if wrote_combined {
+                continue;
+            }
+
             let box_type = &buf[4..8]; // ASCII
             let is_moof = box_type == b"moof";
             let is_mdat = box_type == b"mdat";
 
             match (is_moof, is_mdat, pending.is_some()) {
-                // Új moof, nincs pending → elmentjük
-                (true, false, false) => {
-                    pending = Some(Pending { group_id: g, bytes: buf });
-                }
-                // Új moof, de van régi pending moof → régi eldob, új lesz pending
-                (true, false, true) => {
-                    let old = pending.take().unwrap();
-                    log::debug!("resync: moof arrived while pending moof still unmatched (old_g={}), dropping old", old.group_id);
-                    pending = Some(Pending { group_id: g, bytes: buf });
-                }
-                // mdat és van pending moof → párba fűz és kiír
-                (false, true, true) => {
-                    let moof = pending.take().unwrap();
-                    // Sorrend konzisztencia ellenőrzés (nem kötelező)
-                    if g < moof.group_id {
-                        log::debug!("mdat older than moof (mdat_g={}, moof_g={}), drop mdat", g, moof.group_id);
-                        continue;
-                    }
-                    let mut fused = moof.bytes;
-                    fused.extend_from_slice(&buf);
-                    {
-                        let mut o = out.lock().await;
-                        o.write_all(&fused).await?;
-                    }
-                }
-                // mdat pending nélkül → nem tudjuk párosítani
-                (false, true, false) => {
-                    log::debug!("orphan mdat g={} -> drop", g);
-                }
-                // Egyéb (más box vagy ismeretlen sorrend) → resync stratégia
-                _ => {
-                    log::debug!("unknown box type g={} type={:?} pending={} -> drop", g, std::str::from_utf8(box_type).ok(), pending.is_some());
-                }
+            (true, false, false) => {
+                //log::debug!("PENDING moof: g={}", g);
+                pending = Some(Pending { group_id: g, bytes: buf });
             }
+            (true, false, true) => {
+                let old = pending.take().unwrap();
+                //log::warn!("RESYNC: new moof g={}, dropping old pending moof g={}", g, old.group_id);
+                pending = Some(Pending { group_id: g, bytes: buf });
+            }
+            (false, true, true) => {
+                let moof = pending.take().unwrap();
+                if g < moof.group_id {
+                    //log::warn!("MDAT older than moof: mdat_g={}, moof_g={}, DROP mdat", g, moof.group_id);
+                    continue;
+                }
+                //log::info!("PAIR OK: moof_g={}, mdat_g={}, writing fused fragment", moof.group_id, g);
+                let mut fused = moof.bytes;
+                fused.extend_from_slice(&buf);
+                out.lock().await.write_all(&fused).await?;
+            }
+            (false, true, false) => {
+                //log::warn!("ORPHAN mdat: g={}, no pending moof", g);
+            }
+            _ => {
+                //log::warn!("UNKNOWN box: g={}, type={:?}, pending={}", g, std::str::from_utf8(box_type).ok(), pending.is_some());
+            }
+        }
         }
 
         Ok(())

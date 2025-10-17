@@ -308,11 +308,18 @@ impl SubgroupWriter {
     ///
     /// BAD STUFF will happen if the size is wrong; this is an advanced feature.
     pub fn create(&mut self, size: usize) -> Result<SubgroupObjectWriter, ServeError> {
+
+        let deadline = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+
         let (writer, reader) = SubgroupObject {
             group: self.info.clone(),
             object_id: self.next,
             status: ObjectStatus::Object,
             size,
+            deadline
         }
         .produce();
 
@@ -445,6 +452,9 @@ pub struct SubgroupObject {
 
     // Object status
     pub status: ObjectStatus,
+
+    // Deadline
+    pub deadline: u64
 }
 
 impl SubgroupObject {
@@ -506,7 +516,6 @@ impl SubgroupObjectWriter {
         }
     }
 
-    /// Write a new chunk of bytes.
     pub fn write(&mut self, chunk: Bytes) -> Result<(), ServeError> {
         if chunk.len() > self.remain {
             log::warn!(
@@ -517,7 +526,6 @@ impl SubgroupObjectWriter {
                 self.info.size,
                 chunk.len()
             );
-            // Helyette: tekintsük töröltnek, ne dobjunk Size hibát
             self.remain = 0;
             return Ok(());
         }

@@ -102,11 +102,11 @@ impl Web {
                             let bps = if let Some(b) = params.bps {
                                 b
                             } else if let Some(m) = params.mbps {
-                                (m * 1_000_000.0) as u64
+                                m as u64
                             } else {
                                 return "Missing 'bps' or 'mbps'".into_response();
                             };
-                            shared_state.update_with_rate_limit_bps(bps);
+                            shared_state.update_with_rate_limit_bps(Some(bps));
                             format!("Rate limit updated: {} bps ({:.2} Mbps)", bps, (bps as f64)/1_000_000.0).into_response()
                         }
                     }

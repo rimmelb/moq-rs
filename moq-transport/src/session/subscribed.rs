@@ -1,8 +1,10 @@
+use bytes::BytesMut;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use core::time;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
+use std::str::Bytes;
 
 use crate::coding::Encode;
 use crate::serve::{ServeError, TrackReaderMode};
@@ -82,22 +84,16 @@ impl Subscribed {
 
         if let Some(timeout_ms) = delivery_timeout_ms {
         if let Some(conn) = self.publisher.connection() {
-                // Bekapcsoljuk a deadline schedulert a connection-ön
                 conn.set_deadline_scheduler(true);
-
-                // Számítsuk ki a deadline-t
                 let now = Instant::now();
                 let deadline = now + Duration::from_millis(timeout_ms);
-
-                // Becsült objektum méret (pl. 500KB video fragment)
                 let estimated_size = 500_000u64;
-                //conn.set_deadline(estimated_size, Some(deadline), now);
         }
     }
 
         let res = self.serve_inner(track, delivery_timeout_ms).await;
         if let Err(err) = &res {
-            self.close(err.clone().into())?;
+            //self.close(err.clone().into())?;
         }
 
         res
@@ -205,34 +201,76 @@ async fn serve_one_subgroup(
     state: State<SubscribedState>,
     timeout: Option<u64>,
 ) -> Result<(), SessionError> {
+
     let sg_group_id = header.group_id;
     let sg_subgroup_id = header.subgroup_id;
     let sg_base_prio = subgroup.priority as i32;
 
+    log::debug!("{:?}", publisher.get_rate_limit_mpbs());
+    publisher.set_bandwidth(
+        publisher.get_rate_limit_mpbs().map(|r| r as u32)
+    );
+
+
     let mut stream = publisher.open_uni().await?;
     stream.set_priority(sg_base_prio);
-
     stream.set_deadline(timeout);
+    let mut writer = Writer::new(stream);
 
-
-    let bandwidth_estimator = publisher.send_bandwidth_estimator.clone();
-    let mut writer = Writer::with_bandwidth_estimator(stream, bandwidth_estimator);
-
+    let mut header_size = BytesMut::new();
     let header_msg: data::Header = header.clone().into();
+    header_msg.encode(&mut header_size);
+
+    //size of the subgroupheader -> on top of the stream
+    let mut subgroup_header_len = header_size.len();
+
+    writer.stream.append_object_size(subgroup_header_len as u64, timeout);
+
+    log::debug!("Subgroup header size: {:?}", subgroup_header_len);
+
     if let Err(e) = writer.encode(&header_msg).await {
-        log::warn!(
-            "subgroup header write stopped by peer (g={}, sg={}): {e}",
-            sg_group_id, sg_subgroup_id
+        log::debug!(
+            "subgroup header write failed (g={}, sg={}): {}. treating as soft drop",
+            sg_group_id, sg_subgroup_id, e
         );
+        let _ = writer.stream.finish();
         return Ok(());
     }
 
     while let Some(mut object) = subgroup.next().await? {
+
+        // Objektum header
         let ob_hdr = data::SubgroupObject {
             object_id: object.object_id,
             size: object.size,
             status: object.status,
+            deadline: object.deadline
         };
+        let mut ob_header = data::SubgroupObject{
+            object_id: object.object_id,
+            size: object.size,
+            status: object.status,
+            deadline: object.deadline
+        };
+
+        let mut object_header_size = BytesMut::new();
+        ob_header.encode(&mut object_header_size);
+
+        //size of the objectheader
+        let mut object_header_len = object_header_size.len();
+        let mut size_of_object = object.size;
+
+        let mut size = size_of_object + object_header_len;
+
+        if(ob_header.object_id < 5) {
+            let extended_timeout = timeout.map(|t| t.saturating_add(100_000));
+            writer.stream.append_object_size(size as u64, extended_timeout);
+        }
+        else {
+            writer.stream.append_object_size(size as u64, timeout);
+        }
+
+        //log::debug!("Object header:{:?}, Object size:{:?}", object_header_len as u64, size_of_object as u64);
 
         if let Err(e) = writer.encode(&ob_hdr).await {
             log::warn!(
@@ -240,31 +278,32 @@ async fn serve_one_subgroup(
                 subgroup.group_id,
                 object.object_id
             );
-            while let Some(_chunk) = object.read().await? {}
-            let _ = writer.stream.finish();
+            let _=writer.stream.finish();
             return Ok(());
         }
-
         state
             .lock_mut()
             .ok_or(ServeError::Done)?
             .update_max_group_id(subgroup.group_id, object.object_id)?;
 
+        // ÚJ: gyűjtsd össze az egész objektumot egyetlen Vec-be
+        let mut full_payload = Vec::with_capacity(size_of_object);
         while let Some(chunk) = object.read().await? {
-            if let Err(e) = writer.write(&chunk).await {
-                log::warn!(
-                    "write stopped mid-object (g={}, o={}): {e}",
-                    subgroup.group_id,
-                    object.object_id
-                );
-                while let Some(_c) = object.read().await? {}
-                // Abort with non-zero application error code (example 0x100)
-                let _ = writer.stream.finish();
-                return Ok(());
-            }
+            full_payload.extend_from_slice(&chunk);
+        }
+
+        // Ellenőrzés: teljes méret megvan-e?
+        if full_payload.len() != size_of_object {
+            log::warn!("object truncated (g={}, o={}): expected {} B, got {} B. skip", subgroup.group_id, object.object_id, size_of_object, full_payload.len());
+            continue;
+        }
+        // Teljes objektum kiírása egyetlen write-tal
+        if let Err(e) = writer.write(&full_payload).await {
+            log::warn!("write stopped for full object (g={}, o={}): {e}. skip & continue", subgroup.group_id, object.object_id);
+            continue;
         }
     }
-
+    let _ = writer.stream.finish();
     Ok(())
 }
 

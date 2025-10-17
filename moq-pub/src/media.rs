@@ -1,6 +1,6 @@
 use anyhow::{self, Context};
 use bytes::{Buf, Bytes};
-use moq_transport::serve::{SubgroupWriter, SubgroupsWriter, TrackWriter, TracksWriter};
+use moq_transport::serve::{ServeError, SubgroupWriter, SubgroupsWriter, TrackWriter, TracksWriter};
 use mp4::{self, ReadBox, TrackType};
 use std::cmp::max;
 use std::collections::HashMap;
@@ -328,6 +328,8 @@ struct Track {
 
     // The type of track, ex. "vide" or "soun"
     handler: TrackType,
+
+    pending: Option<(Bytes, Fragment)>
 }
 
 impl Track {
@@ -337,6 +339,7 @@ impl Track {
             current: None,
             timescale,
             handler,
+            pending: None,
         }
     }
 
@@ -354,9 +357,6 @@ impl Track {
             .as_millis()
             .try_into()
             .context("timestamp too large")?;
-        // Prioritize each group equally for now
-        // (A u8 doesn't give us granularity for ms since epoch)
-        // TODO: Revisit post draft-05 prioritization
         let priority: u8 = 127;
 
         // Create a new segment.
@@ -379,7 +379,6 @@ impl Track {
     pub fn data(&mut self, raw: Bytes) -> anyhow::Result<()> {
         let segment = self.current.as_mut().context("missing current fragment")?;
         segment.write(raw)?;
-
         Ok(())
     }
 

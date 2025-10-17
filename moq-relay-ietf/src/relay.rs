@@ -125,11 +125,6 @@ impl Relay {
 
             let (mut session, publisher, subscriber) = if let Some(rate) = self.rate_limit_bps {
                 let rate = rate as f64;
-                log::info!(
-                    "Forward session rate limit: {:.0} bps ({:.2} Mbps)",
-                    rate,
-                    rate / 1_000_000.0
-                );
                 moq_transport::session::Session::connect_role_with_rate_limit(
                     session,
                     moq_transport::setup::Role::Both,
@@ -194,19 +189,15 @@ impl Relay {
                     let forward = forward.clone();
                     let shared_state = shared_state.clone();
 
+                    if let Some(rate_bps) = rate_limit {
+                            shared_state.update_with_rate_limit_bps(Some(rate_bps as u64));
+                    }
+
                     tasks.push(async move {
                         let (mut session, publisher, subscriber) =
                             moq_transport::session::Session::accept_with_stats(conn_session, provider)
                                 .await
                                 .context("failed to accept MoQ session")?;
-
-                        if let Some(rate) = rate_limit {
-                            // Set fixed send bandwidth in Mbps, then propagate to Publisher
-                            let rate = rate as f64;
-                            session.set_fixed_send_bandwidth_mbps(Some(rate / 1_000_000.0));
-                            session.apply_send_rate_limit_to_publisher();
-                            log::info!("Applied relay rate limit to session: {:.0} bps ({:.2} Mbps)", rate, rate/1_000_000.0);
-                        }
 
                         let session = Session {
                             session,
