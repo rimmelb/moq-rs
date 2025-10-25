@@ -123,7 +123,7 @@ impl Relay {
 
             provider = raw_provider.map(|p| p as Arc<_>);
 
-            let (mut session, publisher, subscriber) = if let Some(rate) = self.rate_limit_bps {
+            let (session, publisher, subscriber) = if let Some(rate) = self.rate_limit_bps {
                 let rate = rate as f64;
                 moq_transport::session::Session::connect_role_with_rate_limit(
                     session,
@@ -154,6 +154,8 @@ impl Relay {
             };
             let shared_state = self.shared_state.clone();
             let forward = session.producer.clone();
+
+
             tasks.push(
                 async move { session.run(shared_state, self.delivery_timeout.clone()).await.context("forwarding failed") }.boxed(),
             );
@@ -194,7 +196,7 @@ impl Relay {
                     }
 
                     tasks.push(async move {
-                        let (mut session, publisher, subscriber) =
+                        let (session, publisher, subscriber) =
                             moq_transport::session::Session::accept_with_stats(conn_session, provider)
                                 .await
                                 .context("failed to accept MoQ session")?;
@@ -205,19 +207,11 @@ impl Relay {
                             consumer: subscriber.map(|subscriber| Consumer::new(subscriber, locals, api, forward)),
                         };
 
-                        // Use bandwidth monitoring if configured
-                         if let Some(interval) = bandwidth_monitoring {
-                            log::info!("Starting session with bandwidth monitoring (interval: {}s)", interval);
-                            let rate_limit = rate_limit.map(|r| r as f64);
-                            let effective_rate = rate_limit.unwrap_or(0.0); // 0.0 = no cap
-                            if let Err(err) = session.run_with_bandwidth_monitoring(shared_state, interval, effective_rate, self.delivery_timeout.clone()).await {
-                                log::warn!("failed to run MoQ session with bandwidth monitoring: {}", err);
-                            }
-                        } else {
-                            if let Err(err) = session.run(shared_state, self.delivery_timeout.clone()).await {
-                                log::warn!("failed to run MoQ session: {}", err);
-                            }
+
+                        if let Err(err) = session.run(shared_state, self.delivery_timeout.clone()).await {
+                            log::warn!("failed to run MoQ session: {}", err);
                         }
+
 
                         Ok::<(), anyhow::Error>(())
                     }.boxed());

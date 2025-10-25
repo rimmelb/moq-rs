@@ -1,9 +1,5 @@
-use std::io;
-
-use crate::coding::{Encode, EncodeError};
-
+use crate::coding::{Encode};
 use super::SessionError;
-use bytes::Buf;
 
 pub struct Writer {
     pub stream: web_transport::SendStream,
@@ -30,7 +26,7 @@ impl Writer {
     }
 
     pub async fn write(&mut self, buf: &[u8]) -> Result<(), SessionError> {
-        let size = self.stream.write(buf).await?;
+        let _size = self.stream.write(buf).await?;
         Ok(())
     }
 }

@@ -80,13 +80,16 @@ async fn main() -> anyhow::Result<()> {
         let clock = clock::Publisher::new(track.groups()?);
 
         let shared_state = SharedState::new();
+        let reporter = session.media_qos_reporter.clone();
 
         tokio::select! {
             res = session.run(shared_state) => res.context("session error")?,
             res = clock.run() => res.context("clock error")?,
-            res = publisher.announce(reader) => res.context("failed to serve tracks")?,
+            res = publisher.announce(reader, reporter) => res.context("failed to serve tracks")?,
         }
-    } else {
+    }
+
+    else {
         let (session, mut subscriber) = Subscriber::connect(session)
             .await
             .context("failed to create MoQ Transport session")?;

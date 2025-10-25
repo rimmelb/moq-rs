@@ -1,17 +1,16 @@
 use bytes::BytesMut;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
-use core::time;
-use std::cmp::Ordering;
-use std::collections::BinaryHeap;
-use std::str::Bytes;
+
+use std::sync::Arc;
 
 use crate::coding::Encode;
 use crate::serve::{ServeError, TrackReaderMode};
+use crate::util::MediaQoSReporter;
 use crate::watch::State;
 use crate::{data, message, serve};
 use std::time::{Duration, Instant};
-use rand::Rng;
+use crate::session::SharedState;
 
 
 use super::{Publisher, SessionError, SubscribeInfo, Writer};
@@ -79,27 +78,36 @@ impl Subscribed {
         (send, recv)
     }
 
-    pub async fn serve(mut self, track: serve::TrackReader) -> Result<(), SessionError> {
+    pub async fn serve(mut self, track: serve::TrackReader, delivery_timeout: Option<u64>, _shared_state: SharedState, enable_deadline_scheduler: bool, report: Arc<MediaQoSReporter>) -> Result<(), SessionError> {
         let delivery_timeout_ms = self.msg.delivery_timeout_ms;
 
-        if let Some(timeout_ms) = delivery_timeout_ms {
-        if let Some(conn) = self.publisher.connection() {
-                conn.set_deadline_scheduler(true);
-                let now = Instant::now();
-                let deadline = now + Duration::from_millis(timeout_ms);
-                let estimated_size = 500_000u64;
-        }
-    }
+        let effective_timeout = match (delivery_timeout_ms, delivery_timeout) {
+            // ha van delivery_timeout_ms és nem 0 → ezt használjuk
+            (Some(ms), _) if ms > 0 => Some(ms),
+            // ha 0 vagy None → ha van delivery_timeout, azt használjuk
+            (_, Some(t)) => Some(t),
+            // különben nincs timeout
+            _ => None,
+        };
 
-        let res = self.serve_inner(track, delivery_timeout_ms).await;
-        if let Err(err) = &res {
-            //self.close(err.clone().into())?;
+        if let Some(timeout_ms) = effective_timeout {
+            if let Some(conn) = self.publisher.connection() {
+                conn.set_deadline_scheduler(enable_deadline_scheduler);
+                let now = Instant::now();
+                let _deadline = now + Duration::from_millis(timeout_ms);
+                // ezt az értéket adod át a serve_inner-nek
+            }
         }
+
+        let res = self.serve_inner(track, effective_timeout, report).await;
+        // if let Err(err) = &res {
+        //     //self.close(err.clone().into())?;
+        // }
 
         res
     }
 
-    async fn serve_inner(&mut self, track: serve::TrackReader, timeout: Option<u64>) -> Result<(), SessionError> {
+    async fn serve_inner(&mut self, track: serve::TrackReader, timeout: Option<u64>, report: Arc<MediaQoSReporter>) -> Result<(), SessionError> {
         let latest = track.latest();
         self.state
             .lock_mut()
@@ -118,7 +126,7 @@ impl Subscribed {
         match track.mode().await? {
             // TODO cancel track/datagrams on closed
             TrackReaderMode::Stream(stream) => self.serve_track(stream).await,
-            TrackReaderMode::Subgroups(subgroups) => self.serve_subgroup(subgroups, timeout).await,
+            TrackReaderMode::Subgroups(subgroups) => self.serve_subgroup(subgroups, timeout, report).await,
             TrackReaderMode::Datagrams(datagrams) => self.serve_datagrams(datagrams).await,
         }
     }
@@ -157,7 +165,8 @@ impl Subscribed {
     async fn serve_subgroup(
         &mut self,
         mut subgroups: serve::SubgroupsReader,
-        timeout: Option<u64>
+        timeout: Option<u64>,
+        report: Arc<MediaQoSReporter>
     ) -> Result<(), SessionError> {
         let mut tasks = FuturesUnordered::new();
         let mut done: Option<Result<(), ServeError>> = None;
@@ -177,8 +186,10 @@ impl Subscribed {
                         let state = self.state.clone();
                         let info = subgroup.info.clone();
 
+                        let reporter = report.clone();
+
                         tasks.push(async move {
-                            if let Err(err) = Self::serve_one_subgroup(header, subgroup, publisher, state, timeout).await {
+                            if let Err(err) = Self::serve_one_subgroup(header, subgroup, publisher, state, timeout, reporter).await {
                                 log::warn!("failed to serve group: {:?}, error: {}", info, err);
                             }
                         });
@@ -200,21 +211,24 @@ async fn serve_one_subgroup(
     mut publisher: Publisher,
     state: State<SubscribedState>,
     timeout: Option<u64>,
+    report: Arc<MediaQoSReporter>
 ) -> Result<(), SessionError> {
 
     let sg_group_id = header.group_id;
     let sg_subgroup_id = header.subgroup_id;
     let sg_base_prio = subgroup.priority as i32;
 
-    log::debug!("{:?}", publisher.get_rate_limit_mpbs());
+    //log::debug!("{:?}", publisher.get_rate_limit_mpbs());
     publisher.set_bandwidth(
         publisher.get_rate_limit_mpbs().map(|r| r as u32)
     );
-
-
     let mut stream = publisher.open_uni().await?;
     stream.set_priority(sg_base_prio);
-    stream.set_deadline(timeout);
+
+    if let Some(_time) = timeout {
+        let new_timeout = 100000000 as u64;
+        stream.set_deadline(Some(new_timeout));
+    }
     let mut writer = Writer::new(stream);
 
     let mut header_size = BytesMut::new();
@@ -222,11 +236,14 @@ async fn serve_one_subgroup(
     header_msg.encode(&mut header_size);
 
     //size of the subgroupheader -> on top of the stream
-    let mut subgroup_header_len = header_size.len();
+    let subgroup_header_len = header_size.len();
 
-    writer.stream.append_object_size(subgroup_header_len as u64, timeout);
+    let time = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
 
-    log::debug!("Subgroup header size: {:?}", subgroup_header_len);
+    writer.stream.append_object_size(subgroup_header_len as u64, timeout, Some(time));
 
     if let Err(e) = writer.encode(&header_msg).await {
         log::debug!(
@@ -239,6 +256,11 @@ async fn serve_one_subgroup(
 
     while let Some(mut object) = subgroup.next().await? {
 
+        let time = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+
         // Objektum header
         let ob_hdr = data::SubgroupObject {
             object_id: object.object_id,
@@ -246,7 +268,7 @@ async fn serve_one_subgroup(
             status: object.status,
             deadline: object.deadline
         };
-        let mut ob_header = data::SubgroupObject{
+        let ob_header = data::SubgroupObject{
             object_id: object.object_id,
             size: object.size,
             status: object.status,
@@ -257,20 +279,21 @@ async fn serve_one_subgroup(
         ob_header.encode(&mut object_header_size);
 
         //size of the objectheader
-        let mut object_header_len = object_header_size.len();
-        let mut size_of_object = object.size;
+        let object_header_len = object_header_size.len();
+        let size_of_object = object.size;
+        let size = size_of_object;
 
-        let mut size = size_of_object + object_header_len;
-
-        if(ob_header.object_id < 5) {
-            let extended_timeout = timeout.map(|t| t.saturating_add(100_000));
-            writer.stream.append_object_size(size as u64, extended_timeout);
+        log::debug!("size of object: {:?} {:?}", size_of_object, object_header_len);
+        //time has to be inserted here to give it the quinn
+        if ob_header.object_id < 5 {
+            let extended_timeout = timeout.map(|t| t.saturating_mul(100));
+            writer.stream.append_object_size(size as u64, extended_timeout, Some(time));
         }
         else {
-            writer.stream.append_object_size(size as u64, timeout);
+            writer.stream.append_object_size(size as u64, timeout, Some(time));
         }
 
-        //log::debug!("Object header:{:?}, Object size:{:?}", object_header_len as u64, size_of_object as u64);
+        log::debug!("{:?}", size as u64);
 
         if let Err(e) = writer.encode(&ob_hdr).await {
             log::warn!(
@@ -292,15 +315,21 @@ async fn serve_one_subgroup(
             full_payload.extend_from_slice(&chunk);
         }
 
+        let track_id = format!("{:?}/{}", subgroup.info.namespace.clone(), subgroup.info.track.name.clone());
+
         // Ellenőrzés: teljes méret megvan-e?
         if full_payload.len() != size_of_object {
             log::warn!("object truncated (g={}, o={}): expected {} B, got {} B. skip", subgroup.group_id, object.object_id, size_of_object, full_payload.len());
-            continue;
+            report.record_missing_frames(track_id.clone(), 1);
+            report.record_decoder_drop(track_id.clone(), 1);
+            return Ok(());
         }
         // Teljes objektum kiírása egyetlen write-tal
         if let Err(e) = writer.write(&full_payload).await {
             log::warn!("write stopped for full object (g={}, o={}): {e}. skip & continue", subgroup.group_id, object.object_id);
-            continue;
+            report.record_missing_frames(track_id, 1);
+            let _= writer.stream.finish();
+            return Ok(());
         }
     }
     let _ = writer.stream.finish();

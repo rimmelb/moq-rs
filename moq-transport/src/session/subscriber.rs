@@ -2,6 +2,7 @@ use std::{
     collections::{hash_map, HashMap},
     io,
     sync::{atomic, Arc, Mutex},
+    time::{Duration, Instant},
 };
 
 use crate::{
@@ -9,14 +10,14 @@ use crate::{
     data,
     message::{self, Message},
     serve::{self, ServeError},
-    setup,
+    setup, util::MediaQoSReporter,
 };
 
 use crate::watch::Queue;
 
 use super::{Announced, AnnouncedRecv, Reader, Session, SessionError, Subscribe, SubscribeRecv};
 
-const DEADLINE_THRESHOLD_MS: u64 = 15;
+const STALL_THRESHOLD: Duration = Duration::from_millis(750);
 
 // TODO remove Clone.
 #[derive(Clone)]
@@ -131,7 +132,7 @@ impl Subscriber {
     pub async fn recv_goaway(&mut self, msg: message::Relay) -> Result<(), SessionError> {
         let res = match &msg {
             message::Relay::GoAway(msg) => self.recv_goaway_message(msg).await,
-            message::Relay::FixBandwidth(msg) => Ok(()),
+            message::Relay::FixBandwidth(_msg) => Ok(()),
         };
         if let Err(SessionError::Serve(err)) = res {
             log::debug!("failed to process message: {:?} {}", msg, err);
@@ -227,40 +228,42 @@ impl Subscriber {
         self.announced.lock().unwrap().remove(namespace);
     }
 
-    #[allow(dead_code)] // Keep for backwards compatibility
-    pub(super) async fn recv_stream(
-        mut self,
-        stream: web_transport::RecvStream,
-    ) -> Result<(), SessionError> {
-        let mut reader = Reader::new(stream);
-        let header: data::Header = reader.decode().await?;
+    // #[allow(dead_code)] // Keep for backwards compatibility
+    // pub(super) async fn recv_stream(
+    //     mut self,
+    //     stream: web_transport::RecvStream,
+    // ) -> Result<(), SessionError> {
+    //     let mut reader = Reader::new(stream);
+    //     let header: data::Header = reader.decode().await?;
 
-        let id = header.subscribe_id();
+    //     let id = header.subscribe_id();
 
-        let res = self.recv_stream_inner(reader, header).await;
-        if let Err(SessionError::Serve(err)) = &res {
-            // The writer is closed, so we should teriminate.
-            // TODO it would be nice to do this immediately when the Writer is closed.
-            if let Some(subscribe) = self.subscribes.lock().unwrap().remove(&id) {
-                subscribe.error(err.clone())?;
-            }
-        }
+    //     let res = self.recv_stream_inner(reader, header).await;
+    //     if let Err(SessionError::Serve(err)) = &res {
+    //         // The writer is closed, so we should teriminate.
+    //         // TODO it would be nice to do this immediately when the Writer is closed.
+    //         if let Some(subscribe) = self.subscribes.lock().unwrap().remove(&id) {
+    //             subscribe.error(err.clone())?;
+    //         }
+    //     }
 
-        res
-    }
+    //     res
+    // }
 
     pub(super) async fn recv_stream_with_bandwidth(
         mut self,
         stream: web_transport::RecvStream,
-        bandwidth_estimator: std::sync::Arc<tokio::sync::Mutex<crate::util::BandwidthEstimator>>,
+        report: Arc<MediaQoSReporter>
     ) -> Result<(), SessionError> {
-        let mut reader = Reader::with_bandwidth_estimator(stream, bandwidth_estimator);
+        let mut reader = Reader::new(stream);
         let header: data::Header = match reader.decode().await {
             Ok(header) => header,
             Err(SessionError::Decode(crate::coding::DecodeError::More(_))) => {
                 log::debug!(
                     "data stream ended before header could be decoded; treating as soft drop"
                 );
+                report.record_missing_frames("unknown".to_string(), 1);
+                report.record_decoder_drop("unknown".to_string(), 1);
                 return Ok(());
             }
             Err(SessionError::Decode(crate::coding::DecodeError::Io(err))) => {
@@ -268,6 +271,8 @@ impl Subscriber {
                     "data stream I/O error before header could be decoded: {}; treating as drop",
                     err
                 );
+                report.record_missing_frames("unknown".to_string(), 1);
+                report.record_decoder_drop("unknown".to_string(), 1);
                 return Ok(());
             }
             Err(SessionError::Transport(err)) => {
@@ -275,23 +280,32 @@ impl Subscriber {
                     "data stream reset before header could be decoded: {}; ignoring",
                     err
                 );
+                report.record_missing_frames("unknown".to_string(), 1);
+                report.record_decoder_drop("unknown".to_string(), 1);
                 return Ok(());
             }
             Err(err) => return Err(err),
+
         };
         let id = header.subscribe_id();
 
-        let res = self.recv_stream_inner(reader, header).await;
+        let res = self.recv_stream_inner(reader, header, report.clone()).await;
 
         match &res {
             Err(SessionError::Serve(ServeError::Cancel)) => {
+                report.record_missing_frames("unknown".to_string(), 1);
+                report.record_decoder_drop("unknown".to_string(), 1);
                 return Ok(());
             }
             Err(SessionError::Transport(e)) => {
+                report.record_missing_frames("unknown".to_string(), 1);
+                report.record_decoder_drop("unknown".to_string(), 1);
                 log::debug!("data stream for subscribe id={} reset by peer: {}; ignoring", id, e);
                 return Ok(());
             }
             Err(SessionError::Serve(err)) => {
+                report.record_missing_frames("unknown".to_string(), 1);
+                report.record_decoder_drop("unknown".to_string(), 1);
                 if let Some(subscribe) = self.subscribes.lock().unwrap().remove(&id) {
                     subscribe.error(err.clone())?;
                 }
@@ -306,6 +320,7 @@ impl Subscriber {
         &mut self,
         reader: Reader,
         header: data::Header,
+        report: Arc<MediaQoSReporter>
     ) -> Result<(), SessionError> {
         let id = header.subscribe_id();
 
@@ -327,7 +342,7 @@ impl Subscriber {
 
         match writer {
             Writer::Track(track) => Self::recv_track(track, reader).await?,
-            Writer::Subgroup(group) => Self::recv_subgroup(group, reader).await?,
+            Writer::Subgroup(group) => Self::recv_subgroup(group, reader, report).await?,
         };
 
         Ok(())
@@ -361,7 +376,6 @@ impl Subscriber {
                     None => {
                         log::debug!("recv_track: truncated object (g={}, remain={}B), dropping object and continuing",
                             chunk.group_id, remain);
-                        // következő objektumra lépünk
                         break;
                     }
                 }
@@ -376,10 +390,13 @@ impl Subscriber {
     async fn recv_subgroup(
         mut group: serve::SubgroupWriter,
         mut reader: Reader,
+        report: Arc<MediaQoSReporter>,
     ) -> Result<(), SessionError> {
         log::trace!("received subgroup: {:?}", group.info);
 
-         while !reader.done().await? {
+        let track_id = group.info.track.name.clone();
+
+        while !reader.done().await? {
             let hdr: data::SubgroupObject = match reader.decode().await {
                 Ok(h) => h,
                 Err(e) => {
@@ -389,48 +406,8 @@ impl Subscriber {
             };
 
             let mut object = group.create(hdr.size)?;
-
             let mut remain = hdr.size;
             let mut write_failed = false;
-
-            // ÚJ: deadline kibontása
-            let deadline_ms = hdr.deadline;
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64;
-
-            let remaining_ms = if now_ms > deadline_ms {
-                now_ms - deadline_ms
-            } else {
-                0 // már lejárt
-            };
-
-            if remaining_ms > DEADLINE_THRESHOLD_MS {
-            log::warn!(
-                "recv_subgroup: object deadline too close (remaining={}ms < threshold={}ms), dropping without reading. size={}B",
-                remaining_ms,
-                DEADLINE_THRESHOLD_MS,
-                hdr.size
-            );
-            // Drain az objektum adatait a stream-ből (de nem írjuk a kimenetre)
-            let mut to_drain = hdr.size;
-            while to_drain > 0 {
-                match reader.read_chunk(to_drain).await {
-                    Ok(Some(bytes)) => to_drain -= bytes.len(),
-                    Ok(None) => {
-                        log::debug!("recv_subgroup: stream ended while draining deadline-exceeded object");
-                        return Ok(());
-                    }
-                    Err(e) => {
-                        log::debug!("recv_subgroup: error while draining deadline-exceeded object: {e}");
-                        return Ok(());
-                    }
-                }
-            }
-            // Ugrás a következő objektumra
-            continue;
-            }
 
             while remain > 0 {
                 match reader.read_chunk(remain).await {
@@ -443,13 +420,11 @@ impl Subscriber {
                         }
                     }
                     Ok(None) => {
-                        // EOF/truncation
                         log::debug!("recv_subgroup: truncated object (remain={}B), draining", remain);
                         write_failed = true;
                         break;
                     }
                     Err(err) => {
-                        // Transport reset
                         log::debug!("recv_subgroup: transport error: {err}; draining rest");
                         write_failed = true;
                         break;
@@ -458,7 +433,6 @@ impl Subscriber {
             }
 
             if write_failed {
-                // Drain fennmaradó bájtokat, hogy a következő objektum header helyes pozícióban legyen
                 while remain > 0 {
                     match reader.read_chunk(remain).await {
                         Ok(Some(bytes)) => remain -= bytes.len(),
@@ -467,16 +441,16 @@ impl Subscriber {
                             return Ok(());
                         }
                         Err(e) => {
-                            log::debug!("recv_subgroup: error while draining: {e}");
+                            log::debug!("recv_subgroup: error while draining failed object: {e}");
                             return Ok(());
                         }
                     }
                 }
-                // NE térj vissza! Menj a következő objektumra
+                report.record_missing_frames(track_id.clone(), 1);
+                report.record_decoder_drop(track_id.clone(), 1);
                 continue;
             }
         }
-
         Ok(())
     }
 

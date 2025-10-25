@@ -7,11 +7,7 @@ use futures::{stream::FuturesUnordered, StreamExt};
 use tokio::sync::Mutex as TokioMutex;
 
 use crate::{
-    coding::Tuple,
-    message::{self, Message},
-    serve::{ServeError, TracksReader},
-    setup,
-    util::BandwidthEstimator,
+    coding::Tuple, message::{self, Message}, serve::{ServeError, TracksReader}, session::SharedState, setup, util::{BandwidthEstimator, MediaQoSReporter}
 };
 
 use crate::watch::Queue;
@@ -29,9 +25,6 @@ pub struct Publisher {
     unknown: Queue<Subscribed>, // Subscriptions without a known announce
     outgoing: Queue<Message>, // Outgoing messages queue
     url: Arc<Mutex<String>>,
-
-    // Bandwidth estimators for outgoing data streams
-    pub send_bandwidth_estimator: Arc<TokioMutex<BandwidthEstimator>>,
 
     // Rate limit for all outgoing streams (bps, u32)
     pub rate_limit_mbps: Arc<AtomicU32>,
@@ -53,7 +46,6 @@ impl Publisher {
             unknown: Default::default(),
             outgoing,
             url: Arc::new(Mutex::new(String::new())),
-            send_bandwidth_estimator: Arc::new(TokioMutex::new(BandwidthEstimator::with_cross_layer())),
             rate_limit_mbps: Arc::new(AtomicU32::new(0)),
             deadline_scheduler: Arc::new(TokioMutex::new(None)),
             stats: None,
@@ -63,7 +55,6 @@ impl Publisher {
     pub(crate) fn with_bandwidth_and_rate_limit(
         outgoing: Queue<Message>,
         webtransport: web_transport::Session,
-        send_bandwidth_estimator: Arc<TokioMutex<BandwidthEstimator>>,
         rate_limit_mbps: Arc<AtomicU32>,
         deadline_scheduler: Arc<TokioMutex<Option<crate::session::DeadlineSchedulerConfig>>>,
         stats: Option<Arc<dyn super::QuicStatsProvider + Send + Sync>>,
@@ -75,7 +66,6 @@ impl Publisher {
             unknown: Default::default(),
             outgoing,
             url: Arc::new(Mutex::new(String::new())),
-            send_bandwidth_estimator,
             rate_limit_mbps,
             deadline_scheduler,
             stats,
@@ -159,7 +149,7 @@ impl Publisher {
 
     /// Announce a namespace and serve tracks using the provided [serve::TracksReader].
     /// The caller uses [serve::TracksWriter] for static tracks and [serve::TracksRequest] for dynamic tracks.
-    pub async fn announce(&mut self, tracks: TracksReader) -> Result<(), SessionError> {
+    pub async fn announce(&mut self, tracks: TracksReader, report: Arc<MediaQoSReporter>) -> Result<(), SessionError> {
         let announce = match self
             .announces
             .lock()
@@ -185,10 +175,10 @@ impl Publisher {
                     match res? {
                         Some(subscribed) => {
                             let tracks = tracks.clone();
-
+                            let reporter = report.clone();
                             subscribe_tasks.push(async move {
                                 let info = subscribed.info.clone();
-                                if let Err(err) = Self::serve_subscribe(subscribed, tracks).await {
+                                if let Err(err) = Self::serve_subscribe(subscribed, tracks, reporter).await {
                                     log::warn!("failed serving subscribe: {:?}, error: {}", info, err)
                                 }
                             });
@@ -223,10 +213,14 @@ impl Publisher {
     pub async fn serve_subscribe(
         subscribe: Subscribed,
         mut tracks: TracksReader,
+        report: Arc<MediaQoSReporter>
     ) -> Result<(), SessionError> {
         if let Some(track) = tracks.subscribe(&subscribe.info.name) {
             let info = subscribe.info.clone();
-            if let Err(err) = subscribe.serve(track).await {
+            let something= 50 as u64;
+            let shared_state = SharedState::new();
+            let deliver = Some(something);
+            if let Err(err) = subscribe.serve(track, deliver, shared_state, false, report).await {
                 match err {
                     SessionError::Serve(ServeError::Cancel) => {
                         log::debug!("subscription {:?} cancelled by peer; treating as drop", info);
@@ -244,7 +238,7 @@ impl Publisher {
                         );
                         return Ok(());
                     }
-                    other => return Ok(()),
+                    _other => return Ok(()),
                 }
             }
         } else {
@@ -466,12 +460,6 @@ impl Publisher {
 
     pub(super) async fn send_datagram(&mut self, data: bytes::Bytes) -> Result<(), SessionError> {
         // Bandwidth accounting
-        {
-            let mut estimator = self.send_bandwidth_estimator.lock().await;
-            estimator.record_bytes(data.len() as u64);
-            let _ = estimator.update();
-        }
-
         Ok(self.webtransport.send_datagram(data).await?)
     }
 }

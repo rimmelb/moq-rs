@@ -8,7 +8,6 @@ use clap::Parser;
 use url::Url;
 
 use crate::tls;
-use quinn::VarInt;
 
 use futures::stream::{FuturesUnordered, StreamExt};
 
@@ -89,7 +88,7 @@ impl QuicStatsProvider for QuinnStatsProvider {
 }
 
 impl Endpoint {
-    pub fn new(config: Config, rate_limit: Option<u32>, rtt: Option<u32>) -> anyhow::Result<Self> {
+    pub fn new(config: Config, _rate_limit: Option<u32>, rtt: Option<u32>) -> anyhow::Result<Self> {
         // Enable BBR congestion control
         // TODO validate the implementation
         let mut transport = quinn::TransportConfig::default();
@@ -97,8 +96,8 @@ impl Endpoint {
     transport
         .max_idle_timeout(Some(time::Duration::from_secs(30).try_into().unwrap()))
         .keep_alive_interval(Some(time::Duration::from_secs(10)))
-        .enable_segmentation_offload(false)            // GSO off → kevesebb micro-burst
-        .mtu_discovery_config(None)                    // MTU discovery off
+        .enable_segmentation_offload(false)
+        .mtu_discovery_config(None)
         .initial_mtu(1200)
         .min_mtu(1200);
 
@@ -107,7 +106,7 @@ impl Endpoint {
     }
 
     // ---- BBR hard-cap ----
-    let mut bbr = quinn::congestion::BbrConfig::default()
+    let bbr = quinn::congestion::BbrConfig::default()
         .enable_deadline_scheduler(false)
         .beta(0.5)
         .guard_ms(3)

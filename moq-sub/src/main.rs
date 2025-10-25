@@ -90,10 +90,11 @@ async fn connect_to_other_session(
 
         let mut media = Media::new(subscriber.clone(), t.clone(), out).await?;
         let shared_state = SharedState::new();
+        let reporter = session.media_qos_reporter.clone();
 
         let result = tokio::select! {
             res = session.run(shared_state) => res.context("session error"),
-            res = media.run() => res.context("media error"),
+            res = media.run(reporter) => res.context("media error"),
         };
 
         match result {

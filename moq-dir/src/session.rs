@@ -1,5 +1,7 @@
+use std::sync::Arc;
+
 use futures::{stream::FuturesUnordered, FutureExt, StreamExt};
-use moq_transport::session::{Announced, Publisher, SharedState, Subscriber};
+use moq_transport::{session::{Announced, Publisher, SharedState, Subscriber}, util::MediaQoSReporter};
 
 use crate::Listings;
 
@@ -22,10 +24,12 @@ impl Session {
         let mut tasks = FuturesUnordered::new();
         let shared_state = SharedState::new();
 
+        let reporter = session.media_qos_reporter.clone();
+
         tasks.push(async move { session.run(shared_state).await.map_err(Into::into) }.boxed());
 
         if let Some(remote) = publisher {
-            tasks.push(Self::serve_subscriber(self.clone(), remote).boxed());
+            tasks.push(Self::serve_subscriber(self.clone(), remote, reporter).boxed());
         }
 
         if let Some(remote) = subscriber {
@@ -38,9 +42,10 @@ impl Session {
         Ok(())
     }
 
-    async fn serve_subscriber(self, mut remote: Publisher) -> anyhow::Result<()> {
+    async fn serve_subscriber(self, mut remote: Publisher, report: Arc<MediaQoSReporter>) -> anyhow::Result<()> {
         // Announce our namespace and serve any matching subscriptions AUTOMATICALLY
-        remote.announce(self.listings.tracks()).await?;
+        let reporter  = report.clone();
+        remote.announce(self.listings.tracks(), reporter).await?;
 
         Ok(())
     }

@@ -1,8 +1,13 @@
+use std::sync::Arc;
+
 use futures::{stream::FuturesUnordered, StreamExt};
 use moq_transport::{
     serve::{ServeError, TracksReader},
-    session::{Publisher, SessionError, Subscribed},
+    session::{Publisher, SessionError, Subscribed}, util::MediaQoSReporter,
+
 };
+
+use moq_transport::session::SharedState;
 
 use crate::{Locals, RemotesConsumer};
 
@@ -22,19 +27,28 @@ impl Producer {
         }
     }
 
-    pub async fn announce(&mut self, tracks: TracksReader) -> Result<(), SessionError> {
-        self.remote.announce(tracks).await
+    pub async fn announce(&mut self, tracks: TracksReader, reporter: Arc<MediaQoSReporter>) -> Result<(), SessionError> {
+        let report = reporter.clone();
+        self.remote.announce(tracks, report).await
     }
 
-    pub async fn run(mut self) -> Result<(), SessionError> {
+    pub async fn run(
+        mut self,
+        delivery_timeout: Option<u64>,
+        shared_state: SharedState,
+        reporter: Arc<MediaQoSReporter>
+    ) -> Result<(), SessionError> {
         let mut tasks = FuturesUnordered::new();
         loop {
             tokio::select! {
                 Some(subscribe) = self.remote.subscribed() => {
                     let this = self.clone();
+                    let shared_state = shared_state.clone();
+                    let value = reporter.clone();
                     tasks.push(async move {
                         let info = subscribe.info.clone();
-                        if let Err(err) = this.clone().serve(subscribe).await {
+                        let report = value.clone();
+                        if let Err(err) = this.clone().serve(subscribe, delivery_timeout, shared_state, report).await {
                             log::warn!("failed serving subscribe: {:?}, error: {}", info, err)
                         }
                     });
@@ -47,11 +61,12 @@ impl Producer {
 }
 
 impl Producer {
-    async fn serve(self, subscribe: Subscribed) -> Result<(), anyhow::Error> {
+    async fn serve(self, subscribe: Subscribed, delivery_timeout: Option<u64>, shared_state: SharedState, reporter: Arc<MediaQoSReporter>) -> Result<(), anyhow::Error> {
         if let Some(mut local) = self.locals.route(&subscribe.info.namespace) {
             if let Some(track) = local.subscribe(&subscribe.info.name) {
                 log::info!("serving from local: {:?}", track.info);
-                return Ok(subscribe.serve(track).await?);
+                let report = reporter.clone();
+                return Ok(subscribe.serve(track, delivery_timeout.clone(), shared_state.clone(), true, report).await?);
             }
         }
         if let Some(remotes) = &self.remotes {
@@ -60,8 +75,8 @@ impl Producer {
                     remote.subscribe(subscribe.info.namespace.clone(), subscribe.info.name.clone())?
                 {
                     log::info!("serving from remote: {:?} {:?}", remote.info, track.info);
-                    // NOTE: Depends on drop(track) being called afterwards
-                    return Ok(subscribe.serve(track.reader).await?);
+                    let report = reporter.clone();
+                    return Ok(subscribe.serve(track.reader, delivery_timeout.clone(), shared_state.clone(), true, report).await?);
                 }
             }
         }

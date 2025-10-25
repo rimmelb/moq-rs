@@ -87,7 +87,7 @@ pub struct Cli {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    init_tracing();
+    //init_tracing();
     let mut cli = Cli::parse();
     let mut url = cli.url.clone();
     let (writer, _, reader) =
@@ -188,11 +188,11 @@ async fn connect_to_other_session(cli: Cli, mut url: Url, r: TracksReader) -> an
             let rate = rate as f64;
             log::info!("Rate limiting enabled: {:.0} bps ({:.2} Mbps)", rate, rate / 1_000_000.0);
         }
-
+        let reporter = session.media_qos_reporter.clone();
         let shared_state = SharedState::new();
         let result = tokio::select! {
             res = session.run(shared_state) => res.context("session error"),
-            res = publisher.announce(r.clone()) => res.context("failed to serve tracks"),
+            res = publisher.announce(r.clone(), reporter) => res.context("failed to serve tracks"),
         };
 
         match result {

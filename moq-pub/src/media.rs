@@ -1,28 +1,21 @@
 use anyhow::{self, Context};
 use bytes::{Buf, Bytes};
-use moq_transport::serve::{ServeError, SubgroupWriter, SubgroupsWriter, TrackWriter, TracksWriter};
+use moq_transport::serve::{SubgroupWriter, SubgroupsWriter, TrackWriter, TracksWriter};
 use mp4::{self, ReadBox, TrackType};
 use std::cmp::max;
 use std::collections::HashMap;
 use std::io::Cursor;
+use std::io::Write;
+use std::fs;
 use std::time;
-
+use std::time::SystemTime;
 pub struct Media {
-    // Tracks based on their track ID.
     tracks: HashMap<u32, Track>,
-
-    // The full broadcast of tracks
     broadcast: TracksWriter,
-
-    // The init and catalog tracks
     init: SubgroupsWriter,
     catalog: SubgroupsWriter,
-
-    // The ftyp and moov atoms at the start of the file.
     ftyp: Option<Bytes>,
     moov: Option<mp4::MoovBox>,
-
-    // The current track name
     current: Option<u32>,
 }
 
@@ -54,8 +47,6 @@ impl Media {
         }
     }
 
-    // Parse the input buffer, reading any full atoms we can find.
-    // Keep appending more data and calling parse.
     pub fn parse<B: Buf>(&mut self, buf: &mut B) -> anyhow::Result<()> {
         while self.parse_atom(buf)? {}
         Ok(())
@@ -76,8 +67,6 @@ impl Media {
                     tracing::debug!("multiple ftyp atoms");
                     return Ok(true);
                 }
-
-                // Save the ftyp atom for later.
                 self.ftyp = Some(atom)
             }
             mp4::BoxType::MoovBox => {
@@ -86,20 +75,15 @@ impl Media {
                     return Ok(true);
                 }
 
-                // Parse the moov box so we can detect the timescales for each track.
                 let moov = mp4::MoovBox::read_box(&mut reader, header.size)?;
-
                 self.setup(&moov, atom)?;
                 self.moov = Some(moov);
             }
             mp4::BoxType::MoofBox => {
                 let moof = mp4::MoofBox::read_box(&mut reader, header.size)?;
-
-                // Process the moof.
                 let fragment = Fragment::new(moof)?;
 
                 if fragment.keyframe {
-                    // Gross but thanks to rust we have to do a separate hashmap lookup
                     if self
                         .tracks
                         .get(&fragment.track)
@@ -107,66 +91,65 @@ impl Media {
                         .handler
                         == TrackType::Video
                     {
-                        // Start a new group for the keyframe.
                         for track in self.tracks.values_mut() {
                             track.end_group();
                         }
                     }
                 }
 
-                // Get the track for this moof.
                 let track = self
                     .tracks
                     .get_mut(&fragment.track)
                     .context("failed to find track")?;
 
-                // Save the track ID for the next iteration, which must be a mdat.
                 anyhow::ensure!(self.current.is_none(), "multiple moof atoms");
                 self.current.replace(fragment.track);
 
-                // Publish the moof header, creating a new segment if it's a keyframe.
                 track
                     .header(atom, fragment)
                     .context("failed to publish moof")?;
             }
             mp4::BoxType::MdatBox => {
-                // Get the track ID from the previous moof.
                 let track = self.current.take().context("missing moof")?;
                 let track = self
                     .tracks
                     .get_mut(&track)
                     .context("failed to find track")?;
 
-                // Publish the mdat atom.
                 track.data(atom).context("failed to publish mdat")?;
             }
-
-            _ => {
-                // Skip unknown atoms
-            }
+            _ => {}
         }
 
         Ok(true)
     }
 
     fn setup(&mut self, moov: &mp4::MoovBox, raw: Bytes) -> anyhow::Result<()> {
-        // Combine the ftyp+moov atoms into a single object.
         let mut init = self.ftyp.clone().context("missing ftyp")?.to_vec();
         init.extend_from_slice(&raw);
 
-        // Create the catalog track with a single segment.
         self.init.append(0)?.write(init.into())?;
 
         let mut tracks = Vec::new();
 
-        // Produce the catalog
         for trak in &moov.traks {
             let id = trak.tkhd.track_id;
             let name = format!("{}.m4s", id);
-
             let timescale = track_timescale(moov, id);
-            let handler = (&trak.mdia.hdlr.handler_type).try_into()?;
 
+            {
+                let json_path = "tmp/timescales.json";
+                let mut map: HashMap<u32, u64> = if let Ok(json) = std::fs::read_to_string(json_path) {
+                    serde_json::from_str(&json).unwrap_or_default()
+                } else {
+                    HashMap::new()
+                };
+                map.insert(id, timescale);
+                std::fs::write(json_path, serde_json::to_string_pretty(&map)?)?;
+                log::info!("🕒 Saved timescale for track {id}: {timescale}");
+            }
+
+            let handler = (&trak.mdia.hdlr.handler_type).try_into()?;
             let mut selection_params = moq_catalog::SelectionParam::default();
 
             let mut track = moq_catalog::Track {
@@ -181,15 +164,9 @@ impl Media {
             let stsd = &trak.mdia.minf.stbl.stsd;
 
             if let Some(avc1) = &stsd.avc1 {
-                // avc1[.PPCCLL]
-                //
-                // let profile = 0x64;
-                // let constraints = 0x00;
-                // let level = 0x1f;
                 let profile = avc1.avcc.avc_profile_indication;
-                let constraints = avc1.avcc.profile_compatibility; // Not 100% certain here, but it's 0x00 on my current test video
+                let constraints = avc1.avcc.profile_compatibility;
                 let level = avc1.avcc.avc_level_indication;
-
                 let width = avc1.width;
                 let height = avc1.height;
 
@@ -200,7 +177,6 @@ impl Media {
                 selection_params.width = Some(width.into());
                 selection_params.height = Some(height.into());
             } else if let Some(_hev1) = &stsd.hev1 {
-                // TODO https://github.com/gpac/mp4box.js/blob/325741b592d910297bf609bc7c400fc76101077b/src/box-codecs.js#L106
                 anyhow::bail!("HEVC not yet supported")
             } else if let Some(mp4a) = &stsd.mp4a {
                 let desc = &mp4a
@@ -223,7 +199,6 @@ impl Media {
                     selection_params.bitrate = Some(bitrate);
                 }
             } else if let Some(vp09) = &stsd.vp09 {
-                // https://github.com/gpac/mp4box.js/blob/325741b592d910297bf609bc7c400fc76101077b/src/box-codecs.js#L238
                 let vpcc = &vp09.vpcc;
                 let codec_str = format!(
                     "vp09.0.{:02x}.{:02x}.{:02x}",
@@ -234,18 +209,14 @@ impl Media {
                 selection_params.width = Some(vp09.width.into());
                 selection_params.height = Some(vp09.height.into());
 
-                // TODO Test if this actually works; I'm just guessing based on mp4box.js
                 anyhow::bail!("VP9 not yet supported")
             } else {
-                // TODO add av01 support: https://github.com/gpac/mp4box.js/blob/325741b592d910297bf609bc7c400fc76101077b/src/box-codecs.js#L251
                 anyhow::bail!("unknown codec for track: {}", trak.tkhd.track_id);
             }
 
             track.selection_params = selection_params;
-
             tracks.push(track);
 
-            // Store the track publisher in a map so we can update it later.
             let track = self.broadcast.create(&name).context("broadcast closed")?;
             let track = Track::new(track, handler, timescale);
             self.tracks.insert(id, track);
@@ -261,49 +232,37 @@ impl Media {
         };
 
         let catalog_str = serde_json::to_string_pretty(&catalog)?;
-
         log::info!("catalog: {}", catalog_str);
 
-        // Create a single fragment for the segment.
         self.catalog.append(0)?.write(catalog_str.into())?;
 
         Ok(())
     }
 }
 
-// Find the next full atom in the buffer.
-// TODO return the amount of data still needed in Err?
 fn next_atom<B: Buf>(buf: &mut B) -> anyhow::Result<Option<Bytes>> {
     let mut peek = Cursor::new(buf.chunk());
 
     if peek.remaining() < 8 {
         if buf.remaining() != buf.chunk().len() {
-            // TODO figure out a way to peek at the first 8 bytes
             anyhow::bail!("TODO: vectored Buf not yet supported");
         }
-
         return Ok(None);
     }
 
-    // Convert the first 4 bytes into the size.
     let size = peek.get_u32();
     let _type = peek.get_u32();
 
     let size = match size {
-        // Runs until the end of the file.
         0 => anyhow::bail!("TODO: unsupported EOF atom"),
-
-        // The next 8 bytes are the extended size to be used instead.
         1 => {
             let size_ext = peek.get_u64();
             anyhow::ensure!(size_ext >= 16, "impossible extended box size: {}", size_ext);
             size_ext as usize
         }
-
         2..=7 => {
             anyhow::bail!("impossible box size: {}", size)
         }
-
         size => size as usize,
     };
 
@@ -312,24 +271,21 @@ fn next_atom<B: Buf>(buf: &mut B) -> anyhow::Result<Option<Bytes>> {
     }
 
     let atom = buf.copy_to_bytes(size);
-
     Ok(Some(atom))
 }
 
 struct Track {
-    // The track we're producing
     track: SubgroupsWriter,
-
-    // The current segment
     current: Option<SubgroupWriter>,
-
-    // The number of units per second.
     timescale: u64,
-
-    // The type of track, ex. "vide" or "soun"
     handler: TrackType,
+    pending: Option<PendingFragment>,
+}
 
-    pending: Option<(Bytes, Fragment)>
+struct PendingFragment {
+    fragment: Fragment,
+    moof_group_id: u64,
+    moof_object_id: u64,
 }
 
 impl Track {
@@ -345,79 +301,139 @@ impl Track {
 
     pub fn header(&mut self, raw: Bytes, fragment: Fragment) -> anyhow::Result<()> {
         if let Some(current) = self.current.as_mut() {
-            // Use the existing segment
-            current.write(raw)?;
+            let mut object = current.create(raw.len())?;
+            let group_id = object.info.group.group_id;
+            let object_id = object.info.object_id;
+
+            fs::create_dir_all("tmp")?;
+            let path = format!("tmp/pub_moof_g{}_o{}.bin", group_id, object_id);
+            let mut file = std::fs::File::create(&path)?;
+            file.write_all(&raw)?;
+            //log::debug!("💾 Saved moof fragment to {}", path);
+
+            object.write(raw)?;
+            self.pending = Some(PendingFragment {
+                fragment: fragment.clone(),
+                moof_group_id: group_id,
+                moof_object_id: object_id,
+            });
             return Ok(());
         }
 
-        // Otherwise make a new segment
-
-        let _timestamp: u32 = fragment
-            .timestamp(self.timescale)
-            .as_millis()
-            .try_into()
-            .context("timestamp too large")?;
         let priority: u8 = 127;
-
-        // Create a new segment.
         let mut segment = self.track.append(priority)?;
+        let group_id = segment.info.group_id;
 
-        println!(
-            "timestamp: {:?} segment: {:?}:{:?} priority: {:?}",
-            fragment.timestamp, segment.info.group_id, segment.info.subgroup_id, priority
-        );
+        let mut object = segment.create(raw.len())?;
+        let object_id = object.info.object_id;
 
-        // Write the fragment in it's own object.
-        segment.write(raw)?;
+        fs::create_dir_all("tmp")?;
+        let path = format!("tmp/pub_moof_g{}_o{}.bin", group_id, object_id);
+        let mut file = std::fs::File::create(&path)?;
+        file.write_all(&raw)?;
+        //log::debug!("💾 Saved moof fragment to {}", path);
 
-        // Save for the next iteration
+        object.write(raw)?;
+        self.pending = Some(PendingFragment {
+            fragment,
+            moof_group_id: group_id,
+            moof_object_id: object_id,
+        });
+
         self.current = Some(segment);
-
         Ok(())
     }
+
 
     pub fn data(&mut self, raw: Bytes) -> anyhow::Result<()> {
-        let segment = self.current.as_mut().context("missing current fragment")?;
-        segment.write(raw)?;
-        Ok(())
+    let pending = match self.pending.take() {
+        Some(pending) => pending,
+        None => {
+            log::warn!("⚠️ No pending fragment when saving mdat");
+            return Ok(());
+        }
+    };
+
+    let segment = self.current.as_mut().context("missing current fragment")?;
+    let mut object = segment.create(raw.len())?;
+
+    fs::create_dir_all("tmp")?;
+    let track_id = pending.fragment.track;
+
+    // ✅ CRITICAL: Use MOOF group_id and object_id, not MDAT's
+    let path = format!(
+        "tmp/pub_mdat_g{}_o{}_track{}.bin",
+        pending.moof_group_id,
+        pending.moof_object_id,
+        track_id
+    );
+
+    let mut file = std::fs::File::create(&path)?;
+    file.write_all(&raw)?;
+    //log::debug!("💾 Saved mdat fragment to {}", path);
+
+    object.write(raw)?;
+
+    let start_pts = pending.fragment.timestamp as f64 / self.timescale as f64;
+    let duration = 0.042;
+
+    let capture_unix_us = pending.fragment.capture_wallclock
+        .duration_since(time::UNIX_EPOCH)
+        .unwrap_or_default()  // ✅ Ha hiba van, 0 Duration-t ad vissza
+        .as_micros() as u64;
+
+
+    let manifest_path = format!("tmp/pub_manifest_track{}.txt", track_id);
+    let mut manifest_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&manifest_path)?;
+
+    writeln!(
+            manifest_file,
+            "{}|{}|{}|{:.6}|{:.6}|{}",  // ✅ Added 6th field
+            pending.moof_group_id,
+            pending.moof_object_id,
+            track_id,
+            start_pts,
+            duration,
+            capture_unix_us  // ✅ Publisher wallclock timestamp
+        )?;
+
+    Ok(())
     }
+
 
     pub fn end_group(&mut self) {
         self.current = None;
     }
 }
 
+
+#[derive(Clone)]
 struct Fragment {
-    // The track for this fragment.
     track: u32,
-
-    // The timestamp of the first sample in this fragment, in timescale units.
     timestamp: u64,
-
-    // True if this fragment is a keyframe.
     keyframe: bool,
+    capture_wallclock: SystemTime,
 }
 
 impl Fragment {
     fn new(moof: mp4::MoofBox) -> anyhow::Result<Self> {
-        // We can't split the mdat atom, so this is impossible to support
         anyhow::ensure!(moof.trafs.len() == 1, "multiple tracks per moof atom");
         let track = moof.trafs[0].tfhd.track_id;
-
-        // Parse the moof to get some timing information to sleep.
         let timestamp = sample_timestamp(&moof).expect("couldn't find timestamp");
-
-        // Detect if we should start a new segment.
         let keyframe = sample_keyframe(&moof);
+
 
         Ok(Self {
             track,
             timestamp,
             keyframe,
+            capture_wallclock: SystemTime::now()
         })
     }
 
-    // Convert from timescale units to a duration.
     fn timestamp(&self, timescale: u64) -> time::Duration {
         time::Duration::from_millis(1000 * self.timestamp / timescale)
     }
@@ -429,7 +445,6 @@ fn sample_timestamp(moof: &mp4::MoofBox) -> Option<u64> {
 
 fn sample_keyframe(moof: &mp4::MoofBox) -> bool {
     for traf in &moof.trafs {
-        // TODO trak default flags if this is None
         let default_flags = traf.tfhd.default_sample_flags.unwrap_or_default();
         let trun = match &traf.trun {
             Some(t) => t,
@@ -446,9 +461,8 @@ fn sample_keyframe(moof: &mp4::MoofBox) -> bool {
                 flags = trun.first_sample_flags.unwrap();
             }
 
-            // https://chromium.googlesource.com/chromium/src/media/+/master/formats/mp4/track_run_iterator.cc#177
-            let keyframe = (flags >> 24) & 0x3 == 0x2; // kSampleDependsOnNoOther
-            let non_sync = (flags >> 16) & 0x1 == 0x1; // kSampleIsNonSyncSample
+            let keyframe = (flags >> 24) & 0x3 == 0x2;
+            let non_sync = (flags >> 16) & 0x1 == 0x1;
 
             if keyframe && !non_sync {
                 return true;
@@ -459,7 +473,6 @@ fn sample_keyframe(moof: &mp4::MoofBox) -> bool {
     false
 }
 
-// Find the timescale for the given track.
 fn track_timescale(moov: &mp4::MoovBox, track_id: u32) -> u64 {
     let trak = moov
         .traks

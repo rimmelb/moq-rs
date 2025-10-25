@@ -22,6 +22,34 @@ use moq_transport::session::SharedState;
 use std::net;
 use url::Url;
 
+use tracing_subscriber::{fmt, EnvFilter};
+use tracing_subscriber::prelude::*;
+
+fn init_tracing() {
+    // RUST_LOG-al felülírható, pl.:
+    // RUST_LOG="bbr.deadline=debug,moq_relay_ietf=info,moq_transport=debug" ./dev/relay
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| {
+            // Alapértelmezett: bbr.deadline és bbr.sg=debug, relay/transport=info, Quinn=warn
+            "bbr.deadline=debug,bbr.sg=debug,moq_relay_ietf=info,moq_transport=info,quinn=warn,moq_native_ietf=info"
+                .parse()
+                .unwrap()
+        });
+
+    let fmt_layer = fmt::layer()
+        .with_target(true)       // Mutassa a target-et (modul név)
+        .with_thread_ids(false)  // Ne mutassa a thread ID-t
+        .with_level(true)        // Mutassa a log szintet
+        .with_ansi(false)        // Ne használjon színeket (ha fájlba megy)
+        .compact();              // Kompakt formátum
+
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(fmt_layer)
+        .init();
+}
+
+
 #[derive(Parser, Clone)]
 pub struct Cli {
     /// Listen on this address
@@ -70,13 +98,7 @@ pub struct Cli {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    env_logger::init();
-
-    // Disable tracing so we don't get a bunch of Quinn spam.
-    let tracer = tracing_subscriber::FmtSubscriber::builder()
-        .with_max_level(tracing::Level::WARN)
-        .finish();
-    tracing::subscriber::set_global_default(tracer).unwrap();
+    init_tracing();
 
     let cli = Cli::parse();
     let tls = cli.tls.load()?;

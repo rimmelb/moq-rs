@@ -3,6 +3,7 @@ use futures::{stream::FuturesUnordered, FutureExt, StreamExt};
 use moq_transport::{
     serve::Tracks,
     session::{Announced, SessionError, Subscriber},
+    util::MediaQoSReporter
 };
 use std::sync::Arc;
 
@@ -31,30 +32,34 @@ impl Consumer {
         }
     }
 
-    pub async fn run(mut self, delivery_timeout: Option<u64>) -> Result<(), SessionError> {
-        let mut tasks = FuturesUnordered::new();
+    pub async fn run(mut self, reporter: Arc<MediaQoSReporter>) -> Result<(), SessionError> {
+    let mut tasks = FuturesUnordered::new();
 
-        loop {
-            tokio::select! {
-                Some(announce) = self.remote.announced() => {
-                    let this = self.clone();
+    loop {
+        // klón minden iteráció elején
+        let reporter = reporter.clone();
 
-                    tasks.push(async move {
-                        let info = announce.clone();
-                        log::info!("serving announce: {:?}", info);
+        tokio::select! {
+            Some(announce) = self.remote.announced() => {
+                let this = self.clone();
 
-                        if let Err(err) = this.serve(announce, delivery_timeout).await {
-                            log::warn!("failed serving announce: {:?}, error: {}", info, err)
-                        }
-                    });
-                },
-                _ = tasks.next(), if !tasks.is_empty() => {},
-                else => return Ok(()),
-            };
-        }
+                tasks.push(async move {
+                    let info = announce.clone();
+                    log::info!("serving announce: {:?}", info);
+                    let report = reporter.clone();
+                    if let Err(err) = this.serve(announce, report).await {
+                        log::warn!("failed serving announce: {:?}, error: {}", info, err)
+                    }
+                });
+            },
+            _ = tasks.next(), if !tasks.is_empty() => {},
+            else => return Ok(()),
+        };
     }
+}
 
-    async fn serve(mut self, mut announce: Announced, delivery_timeout: Option<u64>) -> Result<(), anyhow::Error> {
+
+    async fn serve(mut self, mut announce: Announced, reporter: Arc<MediaQoSReporter>) -> Result<(), anyhow::Error> {
         let mut tasks = FuturesUnordered::new();
 
         let (_, mut request, reader) = Arc::new(Tracks::new(announce.namespace.clone())).produce();
@@ -70,21 +75,20 @@ impl Consumer {
         let _register = self.locals.register(reader.clone()).await?;
 
         announce.ok()?;
+        let report = reporter.clone();
 
         if let Some(mut forward) = self.forward {
             tasks.push(
                 async move {
                     log::info!("forwarding announce: {:?}", reader.info);
                     forward
-                        .announce(reader)
+                        .announce(reader, report)
                         .await
                         .context("failed forwarding announce")
                 }
                 .boxed(),
             );
         }
-
-        let ms = delivery_timeout.unwrap_or(u64::MAX);
 
         loop {
             tokio::select! {
@@ -99,10 +103,9 @@ impl Consumer {
                         let info = track.clone();
                         log::info!("forwarding subscribe: {:?}", info);
 
-                        if let Err(err) = remote.subscribe_with_timeout(track, ms).await {
+                        if let Err(err) = remote.subscribe(track).await {
                             log::warn!("failed forwarding subscribe: {:?}, error: {}", info, err)
                         }
-
                         Ok(())
                     }.boxed());
                 },

@@ -1,4 +1,4 @@
-use crate::coding::{Decode, DecodeError, Encode, EncodeError, Tuple};
+use crate::coding::{Decode, DecodeError, Encode, EncodeError};
 /// Sent by the server to indicate that the client should connect to a different server.
 #[derive(Clone, Debug)]
 pub struct FixBandwidth {

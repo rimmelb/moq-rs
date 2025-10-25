@@ -1,26 +1,34 @@
-use std::{io::Cursor, sync::Arc};
-
+use std::{io::Cursor, sync::Arc, collections::HashMap};
 use anyhow::Context;
-use log::{debug, info, trace, warn};
+use log::{debug, info, warn};
 use moq_transport::serve::{
-    SubgroupObjectReader, SubgroupReader, TrackReader, TrackReaderMode, Tracks, TracksReader,
-    TracksWriter,
+    SubgroupObjectReader, SubgroupReader, TrackReader, TrackReaderMode,
+    Tracks, TracksReader, TracksWriter,
 };
 use moq_transport::session::Subscriber;
-use mp4::ReadBox;
+use moq_transport::util::MediaQoSReporter;
+use mp4::{ReadBox, BoxHeader, MoofBox};
 use tokio::{
     io::{AsyncReadExt, AsyncWrite, AsyncWriteExt},
     sync::Mutex,
     task::JoinSet,
+    fs,
 };
+use std::time::{Duration, Instant, SystemTime};
 
+// -----------------------------------------------------------------------------
+// Struct definition
+// -----------------------------------------------------------------------------
 pub struct Media<O> {
     subscriber: Subscriber,
     broadcast: TracksReader,
     tracks_writer: TracksWriter,
     output: Arc<Mutex<O>>,
+    init_paths: Arc<Mutex<HashMap<String, String>>>,
+    timescales: Arc<HashMap<u32, u32>>,
 }
 
+// -----------------------------------------------------------------------------
 impl<O: AsyncWrite + Send + Unpin + 'static> Media<O> {
     pub async fn new(
         subscriber: Subscriber,
@@ -28,119 +36,27 @@ impl<O: AsyncWrite + Send + Unpin + 'static> Media<O> {
         output: O,
     ) -> anyhow::Result<Self> {
         let (tracks_writer, _tracks_request, tracks_reader) = Arc::clone(&tracks).produce();
-        let broadcast = tracks_reader; // breadcrumb for navigating API name changes
+        let broadcast = tracks_reader;
+
+        let timescales: HashMap<u32, u32> = match fs::read_to_string("tmp/timescales.json").await {
+            Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
+            Err(_) => {
+                warn!("⚠️ Missing tmp/timescales.json, using default 24000");
+                HashMap::new()
+            }
+        };
+
         Ok(Self {
             subscriber,
             broadcast,
             tracks_writer,
             output: Arc::new(Mutex::new(output)),
+            init_paths: Arc::new(Mutex::new(HashMap::new())),
+            timescales: Arc::new(timescales),
         })
     }
 
-    // Írj ki egy subgroupot úgy, hogy csak teljes moof+mdat páros menjen ki.
-    async fn write_subgroup_paired(mut group: SubgroupReader, out: Arc<Mutex<O>>) -> anyhow::Result<()> {
-        #[derive(Debug)]
-        struct Pending {
-            group_id: u64,
-            bytes: Vec<u8>,
-        }
-
-        let mut pending: Option<Pending> = None;
-        let mut last_group: Option<u64> = None;
-
-        while let Some(object) = group.next().await? {
-            let g = object.object_id;
-            let declared = object.size;
-            let mut buf = Vec::with_capacity(declared);
-            let mut read_total = 0usize;
-            let mut obj = object;
-
-            while let Some(chunk) = obj.read().await? {
-                read_total += chunk.len();
-                buf.extend_from_slice(&chunk);
-            }
-
-            if read_total != declared {
-                log::debug!("drop truncated object g={} declared={} got={}", g, declared, read_total);
-                // Truncált → ha moof lett volna, törölj pending-et is
-                continue;
-            }
-
-            // Gap detektálás (egyszerű heuristic)
-            if let Some(prev) = last_group {
-                if g > prev + 1 {
-                    // gap → resync
-                    if pending.is_some() {
-                        log::debug!("gap detected ({} -> {}), clearing pending", prev, g);
-                        pending = None;
-                    }
-                }
-            }
-            last_group = Some(g);
-
-            // Minimum MP4 box header: 8 bájt (size(4)+type(4))
-            if buf.len() < 8 {
-                log::debug!("object too small for mp4 box g={} size={} -> drop", g, buf.len());
-                continue;
-            }
-
-            // buf: a teljes objektum bájtjai
-            // Gyors detektálás: egy objektumban moof+mdat egymás után?
-            let mut wrote_combined = false;
-            if buf.len() >= 16 {
-                let size1 = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
-                let is_moof = &buf[4..8] == b"moof";
-                if is_moof && buf.len() >= size1 + 8 {
-                    let is_mdat = &buf[size1 + 4..size1 + 8] == b"mdat";
-                    if is_mdat {
-                        // Egy objektumban jött a moof+mdat → írd ki egyben
-                        out.lock().await.write_all(&buf).await?;
-                        wrote_combined = true;
-                    }
-                }
-            }
-            if wrote_combined {
-                continue;
-            }
-
-            let box_type = &buf[4..8]; // ASCII
-            let is_moof = box_type == b"moof";
-            let is_mdat = box_type == b"mdat";
-
-            match (is_moof, is_mdat, pending.is_some()) {
-            (true, false, false) => {
-                //log::debug!("PENDING moof: g={}", g);
-                pending = Some(Pending { group_id: g, bytes: buf });
-            }
-            (true, false, true) => {
-                let old = pending.take().unwrap();
-                //log::warn!("RESYNC: new moof g={}, dropping old pending moof g={}", g, old.group_id);
-                pending = Some(Pending { group_id: g, bytes: buf });
-            }
-            (false, true, true) => {
-                let moof = pending.take().unwrap();
-                if g < moof.group_id {
-                    //log::warn!("MDAT older than moof: mdat_g={}, moof_g={}, DROP mdat", g, moof.group_id);
-                    continue;
-                }
-                //log::info!("PAIR OK: moof_g={}, mdat_g={}, writing fused fragment", moof.group_id, g);
-                let mut fused = moof.bytes;
-                fused.extend_from_slice(&buf);
-                out.lock().await.write_all(&fused).await?;
-            }
-            (false, true, false) => {
-                //log::warn!("ORPHAN mdat: g={}, no pending moof", g);
-            }
-            _ => {
-                //log::warn!("UNKNOWN box: g={}, type={:?}, pending={}", g, std::str::from_utf8(box_type).ok(), pending.is_some());
-            }
-        }
-        }
-
-        Ok(())
-    }
-
-    pub async fn run(&mut self) -> anyhow::Result<()> {
+    pub async fn run(&mut self, reporter: Arc<MediaQoSReporter>) -> anyhow::Result<()> {
         let moov = {
             let init_track_name = "0.mp4";
             let track = self
@@ -159,6 +75,7 @@ impl<O: AsyncWrite + Send + Unpin + 'static> Media<O> {
                 .broadcast
                 .subscribe(init_track_name)
                 .context("no init track")?;
+
             let mut group = match track.mode().await? {
                 TrackReaderMode::Subgroups(mut groups) => {
                     groups.next().await?.context("no init group")?
@@ -166,38 +83,60 @@ impl<O: AsyncWrite + Send + Unpin + 'static> Media<O> {
                 _ => anyhow::bail!("expected init segment"),
             };
 
-            let object = group.next().await?.context("no init fragment")?;
+            let object: SubgroupObjectReader = group.next().await?.context("no init fragment")?;
             let buf = Self::recv_object(object).await?;
+            fs::create_dir_all("tmp/sub").await.ok();
+
+            let mut reader_clone = Cursor::new(&buf);
+            let mut init_data = Vec::new();
+            let mut moov_atom = None;
+
+            while let Ok(atom) = read_atom(&mut reader_clone).await {
+                init_data.extend_from_slice(&atom);
+                if &atom[4..8] == b"moov" {
+                    moov_atom = Some(atom.clone());
+                }
+                if atom.len() < 8 {
+                    break;
+                }
+            }
+
+            info!("✅ full init segment size = {} bytes", init_data.len());
+            let moov_bytes = moov_atom.context("no moov atom found")?;
+
+            let mut moov_reader = Cursor::new(&moov_bytes);
+            let moov_header = BoxHeader::read(&mut moov_reader)?;
+            let moov_box = mp4::MoovBox::read_box(&mut moov_reader, moov_header.size)?;
+
+            for trak in &moov_box.traks {
+                let id = trak.tkhd.track_id;
+                let init_path = format!("tmp/init_track{}.mp4", id);
+                let mut init_file = fs::File::create(&init_path).await?;
+                init_file.write_all(&init_data).await?;
+                init_file.flush().await?;
+                self.init_paths
+                    .lock()
+                    .await
+                    .insert(format!("{}.m4s", id), init_path.clone());
+                info!("✅ Saved per-track init segment: {init_path}");
+            }
+
             self.output.lock().await.write_all(&buf).await?;
-            let mut reader = Cursor::new(&buf);
-
-            let ftyp = read_atom(&mut reader).await?;
-            anyhow::ensure!(&ftyp[4..8] == b"ftyp", "expected ftyp atom");
-
-            let moov = read_atom(&mut reader).await?;
-            anyhow::ensure!(&moov[4..8] == b"moov", "expected moov atom");
-            let mut moov_reader = Cursor::new(&moov);
-            let moov_header = mp4::BoxHeader::read(&mut moov_reader)?;
-
-            mp4::MoovBox::read_box(&mut moov_reader, moov_header.size)?
+            moov_box
         };
 
         let mut has_video = false;
-        let mut has_audio = false; // hagyjuk hamisan, ne írjunk audio-t ugyanarra a kimenetre
         let mut tracks = vec![];
+
         for trak in &moov.traks {
             let id = trak.tkhd.track_id;
             let name = format!("{}.m4s", id);
             info!("found track {name}");
-            let mut active = false;
+
             if !has_video && trak.mdia.minf.stbl.stsd.avc1.is_some() {
-                active = true;
                 has_video = true;
                 info!("using {name} for video");
-            }
-            // FONTOS: ne írjunk audio-t ugyanarra a bytestreamre, mert az érvénytelen MP4 lesz.
-            // Ha kell audio, írd külön kimenetre és remuxold (lásd lent).
-            if active {
+
                 let track = self
                     .tracks_writer
                     .create(&name)
@@ -216,16 +155,32 @@ impl<O: AsyncWrite + Send + Unpin + 'static> Media<O> {
 
         info!("playing {} tracks", tracks.len());
         let mut tasks = JoinSet::new();
+        let out = Arc::clone(&self.output);
+        let init_paths = Arc::clone(&self.init_paths);
+        let timescales = Arc::clone(&self.timescales);
+
         for track in tracks {
-            let out = self.output.clone();
+            let out = Arc::clone(&out);
+            let reporter_clone = Arc::clone(&reporter);
+            let init_paths_clone = Arc::clone(&init_paths);
+            let timescales_clone = Arc::clone(&timescales);
+
             tasks.spawn(async move {
                 let name = track.name.clone();
+                let report = Arc::clone(&reporter_clone);
+
                 if let Err(err) = async {
                     match track.mode().await? {
                         TrackReaderMode::Subgroups(mut groups) => {
                             while let Some(group) = groups.next().await? {
-                                // csak párosan írjuk ki
-                                Self::write_subgroup_paired(group, out.clone()).await?;
+                                Self::write_subgroup_paired(
+                                    group,
+                                    Arc::clone(&out),
+                                    Arc::clone(&report),
+                                    name.clone(),
+                                    Arc::clone(&init_paths_clone),
+                                    Arc::clone(&timescales_clone),
+                                ).await?;
                             }
                         }
                         _ => anyhow::bail!("expected subgroups mode"),
@@ -236,84 +191,314 @@ impl<O: AsyncWrite + Send + Unpin + 'static> Media<O> {
                 }
             });
         }
+
         while tasks.join_next().await.is_some() {}
         Ok(())
     }
 
-    async fn recv_track(track: TrackReader, out: Arc<Mutex<O>>) -> anyhow::Result<()> {
-        let name = track.name.clone();
-        debug!("track {name}: start");
-        if let TrackReaderMode::Subgroups(mut groups) = track.mode().await? {
-            while let Some(group) = groups.next().await? {
-                let out = out.clone();
-                if let Err(err) = Self::recv_group(group, out).await {
-                    warn!("failed to receive group: {err:?}");
+async fn write_subgroup_paired(
+    mut group: SubgroupReader,
+    out: Arc<Mutex<O>>,
+    reporter: Arc<MediaQoSReporter>,
+    track_name: String,
+    init_paths: Arc<Mutex<HashMap<String, String>>>,
+    timescales: Arc<HashMap<u32, u32>>,
+) -> anyhow::Result<()> {
+    #[derive(Debug)]
+    struct Pending {
+        group_id: u64,
+        object_id: u64,
+        bytes: Vec<u8>,
+        received_at: Instant,
+        media_timestamp: Option<u64>,
+    }
+
+    let mut pending: Option<Pending> = None;
+    let mut last_render_time: Option<Instant> = None;
+    let mut frame_sequence = 0u64;
+    let playback_start = Instant::now();
+
+    fs::create_dir_all("tmp/sub").await.ok();
+
+    // ✅ JAVÍTOTT: Load publisher manifest with relative timestamps
+    let track_id: u32 = track_name.split('.').next()
+        .unwrap().parse().unwrap_or(1);
+    let pub_manifest_path = format!("tmp/pub_manifest_track{}.txt", track_id);
+
+    let mut capture_timestamps: HashMap<u64, Duration> = HashMap::new();
+    let mut publisher_start_time: Option<u64> = None;
+
+    if let Ok(manifest_content) = fs::read_to_string(&pub_manifest_path).await {
+        for line in manifest_content.lines() {
+            let parts: Vec<&str> = line.split('|').collect();
+            if parts.len() >= 6 {
+                // Parse: group_id|object_id|track_id|pts|duration|capture_unix_us
+                if let (Ok(object_id), Ok(capture_unix_us)) = (
+                    parts[1].parse::<u64>(),
+                    parts[5].parse::<u64>(),
+                ) {
+                    // ✅ First timestamp is reference point
+                    if publisher_start_time.is_none() {
+                        publisher_start_time = Some(capture_unix_us);
+                    }
+
+                    // ✅ Store as relative duration from start
+                    let relative_duration = Duration::from_micros(
+                        capture_unix_us.saturating_sub(publisher_start_time.unwrap())
+                    );
+                    capture_timestamps.insert(object_id, relative_duration);
                 }
             }
         }
-        debug!("track {name}: finish");
-        Ok(())
+        info!("✅ Loaded {} capture timestamps from publisher manifest",
+            capture_timestamps.len());
+    } else {
+        warn!("⚠️ Publisher manifest not found: {}", pub_manifest_path);
     }
 
-    async fn recv_group(mut group: SubgroupReader, out: Arc<Mutex<O>>) -> anyhow::Result<()> {
-        while let Some(object) = group.next().await? {
-            let expected = object.size;
-            let buf = Self::recv_object(object).await?;
-            if buf.len() != expected {
-                warn!("dropping truncated fragment: expected {}B, got {}B", expected, buf.len());
-                continue;
-            }
-            out.lock().await.write_all(&buf).await?;
-        }
-        Ok(())
-    }
+    // ✅ Reference time for relative timestamps
+    let subscriber_start = Instant::now();
 
-    async fn recv_object(mut object: SubgroupObjectReader) -> anyhow::Result<Vec<u8>> {
-        let mut buf = Vec::with_capacity(object.size);
-        while let Some(chunk) = object.read().await? {
+    while let Some(object) = group.next().await? {
+        let g = object.object_id;
+        let subgroup_g = object.group_id;
+        let declared = object.size;
+        let receive_start = Instant::now();
+
+        let mut buf = Vec::with_capacity(declared);
+        let mut obj = object;
+
+        while let Some(chunk) = obj.read().await? {
             buf.extend_from_slice(&chunk);
         }
-        Ok(buf)
+
+        if buf.len() != declared {
+            reporter.record_missing_frames(&track_name, 1);
+            continue;
+        }
+        if buf.len() < 8 { continue; }
+
+        let is_moof = &buf[4..8] == b"moof";
+        let is_mdat = &buf[4..8] == b"mdat";
+
+        match (is_moof, is_mdat, pending.is_some()) {
+            (true, false, _) => {
+                let moof_path = format!("tmp/sub/sub_moof_g{}_o{}.bin", subgroup_g, g);
+                fs::write(&moof_path, &buf).await?;
+
+                let media_timestamp = extract_media_timestamp(&buf);
+
+                pending = Some(Pending {
+                    group_id: subgroup_g,
+                    object_id: g,
+                    bytes: buf,
+                    received_at: receive_start,
+                    media_timestamp,
+                });
+            }
+            (false, true, true) => {
+                let moof_pending = pending.take().unwrap();
+
+                let mdat_path = format!(
+                    "tmp/sub/sub_mdat_g{}_o{}_track{}.bin",
+                    moof_pending.group_id,
+                    moof_pending.object_id,
+                    track_id
+                );
+                fs::write(&mdat_path, &buf).await?;
+
+                let mut fused = moof_pending.bytes;
+                fused.extend_from_slice(&buf);
+
+                let render_start = Instant::now();
+                out.lock().await.write_all(&fused).await?;
+
+                let timescale = timescales.get(&track_id).cloned().unwrap_or(24000);
+                let (start_pts, duration_secs) =
+                    parse_fragment_timing(&fused, timescale).unwrap_or((0.0, 0.042));
+
+                // ✅ JAVÍTOTT: Use relative timestamp
+                let capture_ts = capture_timestamps
+                    .get(&moof_pending.object_id)
+                    .map(|relative_duration| subscriber_start + *relative_duration)
+                    .or_else(|| {
+                        // Fallback: use receive time - RTT estimate
+                        let estimated_rtt = Duration::from_millis(50);
+                        moof_pending.received_at.checked_sub(estimated_rtt / 2)
+                    });
+
+                if capture_ts.is_none() {
+                    warn!("⚠️ No capture timestamp for object_id={}",
+                        moof_pending.object_id);
+                }
+
+                let playback_position = Duration::from_secs_f64(start_pts);
+                reporter.record_frame_rendered(
+                    &track_name,
+                    frame_sequence,
+                    capture_ts,
+                    render_start,
+                    Some(playback_position),
+                );
+                frame_sequence += 1;
+
+                // ✅ Log TRUE latency
+                if let Some(cap_ts) = capture_ts {
+                    let latency = render_start.duration_since(cap_ts);
+                    if frame_sequence % 100 == 0 {
+                        info!("📊 TRUE End-to-end latency: {:.2}ms (frame {})",
+                            latency.as_secs_f64() * 1000.0, frame_sequence);
+                    }
+                }
+
+                // ✅ Stall detection
+                if let Some(last_render) = last_render_time {
+                    let expected_gap = Duration::from_secs_f64(duration_secs);
+                    let actual_gap = render_start.duration_since(last_render);
+
+                    let stall_threshold = Duration::from_millis(100);
+                    if actual_gap > expected_gap + stall_threshold {
+                        let stall_duration = actual_gap - expected_gap;
+                        reporter.record_playback_stall(&track_name, stall_duration);
+                        warn!("⚠️ Playback stall detected: {:.2}ms",
+                            stall_duration.as_secs_f64() * 1000.0);
+                    }
+                }
+                last_render_time = Some(render_start);
+
+                // ✅ Startup delay (first frame only)
+                if frame_sequence == 1 {
+                    let startup_delay = playback_start.elapsed();
+                    reporter.record_startup_delay(&track_name, startup_delay);
+                }
+
+                // ✅ Subscriber manifest
+                let manifest_path = format!("tmp/sub/sub_manifest_track{}.txt", track_id);
+                let mut manifest = fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&manifest_path)
+                    .await?;
+
+                manifest.write_all(format!(
+                    "{}|{}|{}|{:.6}|{:.6}\n",
+                    moof_pending.group_id,
+                    moof_pending.object_id,
+                    track_id,
+                    start_pts,
+                    duration_secs
+                ).as_bytes()).await?;
+
+                // ✅ Periodic reporting
+                if frame_sequence % 100 == 0 {
+                    reporter.maybe_log_snapshot();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // ✅ Final report
+    reporter.maybe_log_snapshot();
+
+    Ok(())
+}
+
+
+
+async fn recv_object(mut object: SubgroupObjectReader) -> anyhow::Result<Vec<u8>> {
+    let mut buf = Vec::with_capacity(object.size);
+    while let Some(chunk) = object.read().await? {
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
     }
 }
 
-// Read a full MP4 atom into a vector.
+// ✅ Helper function to extract tfdt base_media_decode_time
+fn extract_media_timestamp(moof_buf: &[u8]) -> Option<u64> {
+    use mp4::{BoxHeader, ReadBox, MoofBox};
+    use std::io::Cursor;
+
+    let mut reader = Cursor::new(moof_buf);
+    let header = BoxHeader::read(&mut reader).ok()?;
+    let moof = MoofBox::read_box(&mut reader, header.size).ok()?;
+    let traf = moof.trafs.first()?;
+    let tfdt = traf.tfdt.as_ref()?;
+
+    Some(tfdt.base_media_decode_time)
+}
+
+// -----------------------------------------------------------------------------
 async fn read_atom<R: AsyncReadExt + Unpin>(reader: &mut R) -> anyhow::Result<Vec<u8>> {
-    // Read the 8 bytes for the size + type
     let mut buf = [0u8; 8];
     reader.read_exact(&mut buf).await?;
-
-    // Convert the first 4 bytes into the size.
     let size = u32::from_be_bytes(buf[0..4].try_into()?) as u64;
-
     let mut raw = buf.to_vec();
-
     let mut limit = match size {
-        // Runs until the end of the file.
         0 => reader.take(u64::MAX),
-
-        // The next 8 bytes are the extended size to be used instead.
         1 => {
             reader.read_exact(&mut buf).await?;
             let size_large = u64::from_be_bytes(buf);
-            anyhow::ensure!(
-                size_large >= 16,
-                "impossible extended box size: {}",
-                size_large
-            );
-
             reader.take(size_large - 16)
         }
-
-        2..=7 => {
-            anyhow::bail!("impossible box size: {}", size)
-        }
-
+        2..=7 => anyhow::bail!("impossible box size"),
         size => reader.take(size - 8),
     };
-
-    // Append to the vector and return it.
-    let _read_bytes = limit.read_to_end(&mut raw).await?;
-
+    limit.read_to_end(&mut raw).await?;
     Ok(raw)
+}
+
+fn parse_fragment_timing(buf: &[u8], timescale: u32) -> anyhow::Result<(f64, f64)> {
+    use anyhow::Context;
+    use mp4::{BoxHeader, ReadBox, MoofBox};
+    use std::io::Cursor;
+
+    const FLAG_SAMPLE_CTS: u32 = 0x800;
+
+    let mut reader = Cursor::new(buf);
+    let header = BoxHeader::read(&mut reader)?;
+    let moof = MoofBox::read_box(&mut reader, header.size)?;
+    let traf = moof.trafs.first().context("no traf")?;
+    let tfdt = traf.tfdt.as_ref().context("no tfdt box")?;
+    let base_time = tfdt.base_media_decode_time;
+
+    let mut total_duration = 0u64;
+    if let Some(trun) = &traf.trun {
+        if !trun.sample_durations.is_empty() {
+            for d in &trun.sample_durations {
+                total_duration += *d as u64;
+            }
+        } else if let Some(default) = traf.tfhd.default_sample_duration {
+            total_duration = default as u64 * trun.sample_count as u64;
+        }
+    }
+
+    let mut min_cto = 0i64;
+    let mut max_cto = 0i64;
+
+    if let Some(trun) = &traf.trun {
+        if (trun.flags & FLAG_SAMPLE_CTS) != 0 && !trun.sample_cts.is_empty() {
+            let mut offsets = Vec::with_capacity(trun.sample_cts.len());
+            for &cts in &trun.sample_cts {
+                let signed = if trun.version == 1 {
+                    (cts as i32) as i64
+                } else {
+                    cts as i64
+                };
+                offsets.push(signed);
+            }
+
+            if !offsets.is_empty() {
+                min_cto = *offsets.iter().min().unwrap_or(&0);
+                max_cto = *offsets.iter().max().unwrap_or(&0);
+            }
+        }
+    }
+
+    let start_pts = (base_time as i64 + min_cto) as f64 / timescale as f64;
+    let end_pts = (base_time as i64 + total_duration as i64 + max_cto) as f64 / timescale as f64;
+    let duration = (end_pts - start_pts).max(0.0);
+
+    Ok((start_pts, duration))
 }

@@ -19,14 +19,12 @@ KEY="${KEY:-dev/localhost.key}"
 PORT="${PORT:-4443}"
 BIND="${BIND:-[::]:$PORT}"
 
-# Bandwidth monitoring specific settings
-BANDWIDTH_INTERVAL="${BANDWIDTH_INTERVAL:-10}"  # Default: every 10 seconds
 DETAILED_LOGS="${DETAILED_LOGS:-true}"        # Set to true for detailed bandwidth logs
 
 
 # Enhanced logging for bandwidth monitoring
 if [ "$DETAILED_LOGS" = "true" ]; then
-    export RUST_LOG="moq_transport::util::bandwidth_estimator=trace,moq_transport::util::cross_layer_metrics=debug,moq_transport::util::quic_metrics=debug,moq_transport::session=info,moq_relay_ietf=info,info"
+    export RUST_LOG="debug"
     echo "Detailed bandwidth and cross-layer logging enabled"
 else
     export RUST_LOG="info"
@@ -37,7 +35,7 @@ fi
 ARGS=""
 
 # Rate limiting environment variables
-RELAY_RATE_LIMIT_MBPS=${RELAY_RATE_LIMIT_MBPS:-"100000"}
+RELAY_RATE_LIMIT_MBPS=${RELAY_RATE_LIMIT_MBPS:-"100"}
 
 if [ -n "$RELAY_RATE_LIMIT_MBPS" ]; then
     ARGS="$ARGS --rate-limit-mbps $RELAY_RATE_LIMIT_MBPS"
@@ -60,17 +58,13 @@ if [ -n "${HOST-}" ]; then
 	ARGS="$ARGS --host $HOST"
 fi
 
-# Enable bandwidth monitoring
-ARGS="$ARGS --bandwidth-monitoring $BANDWIDTH_INTERVAL"
-
-DELIVERY_TIMEOUT="${DELIVERY_TIMEOUT:-20}"
+DELIVERY_TIMEOUT="${DELIVERY_TIMEOUT:-60}"
 
 ARGS="$ARGS --delivery-timeout $DELIVERY_TIMEOUT"
 
 echo ""
 echo "Configuration:"
 echo "  - Server: https://localhost:$PORT"
-echo "  - Bandwidth monitoring: every ${BANDWIDTH_INTERVAL}s"
 echo "  - Detailed logs: $DETAILED_LOGS"
 echo ""
 echo "Publish URL: https://quic.video/publish/?server=localhost:$PORT"
@@ -80,8 +74,6 @@ echo "  Terminal 1: ./dev/relay_with_bandwidth"
 echo "  Terminal 2: ./dev/pub_with_bandwidth"
 echo "  Terminal 3: ./dev/sub"
 echo ""
-echo "Environment variables:"
-echo "  BANDWIDTH_INTERVAL=5 ./dev/relay_with_bandwidth  # Monitor every 5 seconds"
 echo "  DETAILED_LOGS=true ./dev/relay_with_bandwidth     # Enable detailed logs"
 echo ""
 
