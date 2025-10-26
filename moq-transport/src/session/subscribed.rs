@@ -283,15 +283,9 @@ async fn serve_one_subgroup(
         let size_of_object = object.size;
         let size = size_of_object;
 
-        log::debug!("size of object: {:?} {:?}", size_of_object, object_header_len);
+        //log::debug!("size of object: {:?} {:?}", size_of_object, object_header_len);
         //time has to be inserted here to give it the quinn
-        if ob_header.object_id < 5 {
-            let extended_timeout = timeout.map(|t| t.saturating_mul(100));
-            writer.stream.append_object_size(size as u64, extended_timeout, Some(time));
-        }
-        else {
-            writer.stream.append_object_size(size as u64, timeout, Some(time));
-        }
+        writer.stream.append_object_size(size as u64, timeout, Some(time));
 
         log::debug!("{:?}", size as u64);
 
