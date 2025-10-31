@@ -243,7 +243,7 @@ async fn serve_one_subgroup(
                 .unwrap_or_default()
                 .as_millis() as u64;
 
-    writer.stream.append_object_size(subgroup_header_len as u64, timeout, Some(time));
+    //writer.stream.append_object_size(subgroup_header_len as u64, timeout, Some(time));
 
     if let Err(e) = writer.encode(&header_msg).await {
         log::debug!(
@@ -285,7 +285,7 @@ async fn serve_one_subgroup(
 
         //log::debug!("size of object: {:?} {:?}", size_of_object, object_header_len);
         //time has to be inserted here to give it the quinn
-        writer.stream.append_object_size(size as u64, timeout, Some(time));
+        //writer.stream.append_object_size(size as u64, timeout, Some(time));
 
         log::debug!("{:?}", size as u64);
 

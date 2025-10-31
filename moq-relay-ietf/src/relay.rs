@@ -130,6 +130,7 @@ impl Relay {
                     moq_transport::setup::Role::Both,
                     provider.clone(),
                     Some(rate),
+                    false
                 )
                 .await
                 .context("failed to establish forward session with rate limit")?

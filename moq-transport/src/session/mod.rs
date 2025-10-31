@@ -77,6 +77,7 @@ impl Session {
         role: setup::Role,
         _rate_limit_bps: Option<f64>,
         stats: Option<Arc<dyn QuicStatsProvider + Send + Sync>>,
+        enable_delivery: bool
     ) -> (Session, Option<Publisher>, Option<Subscriber>) {
         let (outgoing_send, outgoing_recv) = Queue::default().split();
 
@@ -102,7 +103,7 @@ impl Session {
                 (publisher, None)
             }
             setup::Role::Subscriber => {
-                let subscriber = Some(Subscriber::new(outgoing_send));
+                let subscriber = Some(Subscriber::new(outgoing_send, enable_delivery));
                 (None, subscriber)
             }
         };
@@ -188,7 +189,7 @@ impl Session {
                 _ => setup::Role::Publisher,
             },
         };
-        Ok(Session::new(session, sender, recver, role, None, None)) // None rate limit
+        Ok(Session::new(session, sender, recver, role, None, None, false)) // None rate limit
     }
 
     // ÚJ: accept_with_stats
@@ -237,7 +238,7 @@ impl Session {
         log::debug!("sending server SETUP: {:?}", server);
         sender.encode(&server).await?;
 
-        let (session, pubr, subr) = Session::new(session, sender, recver, role, None, stats);
+        let (session, pubr, subr) = Session::new(session, sender, recver, role, None, stats, false);
         Ok((session, pubr, subr))
     }
 
@@ -290,7 +291,7 @@ impl Session {
 
         log::debug!("sending server SETUP: {:?}", server);
         sender.encode(&server).await?;
-        Ok(Session::new(session, sender, recver, role, None, None)) // None rate limit
+        Ok(Session::new(session, sender, recver, role, None, None, false)) // None rate limit
     }
 
     // Hiányzó metódusok hozzáadása
@@ -307,6 +308,7 @@ impl Session {
         role: setup::Role,
         stats: Option<Arc<dyn QuicStatsProvider + Send + Sync>>,
         rate_limit_mbps: Option<f64>,
+        enable_delivery: bool
     ) -> Result<(Session, Option<Publisher>, Option<Subscriber>), SessionError> {
         let control = session.open_bi().await?;
 
@@ -344,7 +346,7 @@ impl Session {
         };
 
         // Biztosítsd, hogy a rate_limit_bps átkerül a Session::new-be
-        let (session, pubr, subr) = Session::new(session, sender, recver, role, rate_limit_mbps, stats);
+        let (session, pubr, subr) = Session::new(session, sender, recver, role, rate_limit_mbps, stats, enable_delivery);
 
         Ok((session, pubr, subr))
     }

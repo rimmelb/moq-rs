@@ -19,7 +19,7 @@ def start(bw_pr=50, bw_bottleneck=0.5, bw_sr=50, delay_ms='50ms', loss=0.0):
     sub   = net.addHost('sub',   ip='10.0.0.3/24')
 
     # Linkek: pub–relay irányban nagyobb sávszél, relay–sub a szűk keresztmetszet
-    net.addLink(pub,   s1, bw=bw_pr,         delay=delay_ms, loss=loss, max_queue_size=100)
+    net.addLink(pub,   s1, bw=bw_pr,         delay=delay_ms, loss=loss, max_queue_size=300)
     net.addLink(relay, s1, bw=bw_bottleneck, delay=delay_ms, loss=loss, max_queue_size=50)
     net.addLink(sub,   s1, bw=bw_sr,         delay=delay_ms, loss=loss, max_queue_size=100)
 

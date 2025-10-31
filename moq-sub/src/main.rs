@@ -69,6 +69,8 @@ async fn connect_to_other_session(
         let provider: Option<Arc<dyn moq_transport::session::QuicStatsProvider + Send + Sync>> =
             provider.map(|p| p as Arc<_>);
 
+        let enable_delivery = true;
+
         // Hozz létre Subscriber session-t rate limit támogatással
         let (session, subscriber) = {
             let (session, _, sub_opt) = moq_transport::session::Session::connect_role_with_rate_limit(
@@ -76,17 +78,10 @@ async fn connect_to_other_session(
                 moq_transport::setup::Role::Subscriber,
                 provider,
                 config.rate_limit_bps.map(|r| r as f64),
+                enable_delivery
             ).await?;
             (session, sub_opt.expect("subscriber role"))
         };
-
-        if let Some(rate) = config.rate_limit_bps {
-            let rate = rate as f64;
-            log::info!("SUB rate limit enabled: {:.0} bps ({:.2} Mbps)", rate, rate/1_000_000.0);
-        }
-        if let Some(rtt) = config.initial_rtt_ms {
-            log::info!("SUB initial RTT hint: {} ms", rtt);
-        }
 
         let mut media = Media::new(subscriber.clone(), t.clone(), out).await?;
         let shared_state = SharedState::new();

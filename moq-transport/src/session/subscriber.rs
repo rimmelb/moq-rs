@@ -18,21 +18,23 @@ use crate::watch::Queue;
 use super::{Announced, AnnouncedRecv, Reader, Session, SessionError, Subscribe, SubscribeRecv};
 
 const STALL_THRESHOLD: Duration = Duration::from_millis(750);
+const DEADLINE_THRESHOLD_MS: u64 = 20;
+
 
 // TODO remove Clone.
 #[derive(Clone)]
 pub struct Subscriber {
     announced: Arc<Mutex<HashMap<Tuple, AnnouncedRecv>>>,
     announced_queue: Queue<Announced>,
-
     subscribes: Arc<Mutex<HashMap<u64, SubscribeRecv>>>,
     subscribe_next: Arc<atomic::AtomicU64>,
     outgoing: Queue<Message>,
     url: Arc<Mutex<String>>,
+    pub enable_delivery: bool
 }
 
 impl Subscriber {
-    pub(super) fn new(outgoing: Queue<Message>) -> Self {
+    pub(super) fn new(outgoing: Queue<Message>, enable_delivery: bool) -> Self {
         Self {
             announced: Default::default(),
             announced_queue: Default::default(),
@@ -40,6 +42,7 @@ impl Subscriber {
             subscribe_next: Default::default(),
             outgoing,
             url: Arc::new(Mutex::new(String::new())),
+            enable_delivery
         }
     }
 
@@ -340,9 +343,11 @@ impl Subscriber {
             }
         };
 
+        let enable_delivery = self.enable_delivery;
+
         match writer {
             Writer::Track(track) => Self::recv_track(track, reader).await?,
-            Writer::Subgroup(group) => Self::recv_subgroup(group, reader, report).await?,
+            Writer::Subgroup(group) => Self::recv_subgroup(group, reader, report, enable_delivery).await?,
         };
 
         Ok(())
@@ -387,72 +392,116 @@ impl Subscriber {
 
     }
 
-    async fn recv_subgroup(
+
+async fn recv_subgroup(
         mut group: serve::SubgroupWriter,
         mut reader: Reader,
         report: Arc<MediaQoSReporter>,
+        enable_delivery: bool, // ✅ Új paraméter
     ) -> Result<(), SessionError> {
-        log::trace!("received subgroup: {:?}", group.info);
-
         let track_id = group.info.track.name.clone();
+        let mut object_count = 0;
 
         while !reader.done().await? {
             let hdr: data::SubgroupObject = match reader.decode().await {
                 Ok(h) => h,
-                Err(e) => {
-                    log::debug!("recv_subgroup: failed to decode object header: {e}; ending subgroup");
-                    return Ok(());
-                }
+                Err(_) => return Ok(()),
+            };
+
+            // ✅ Csak akkor mérjük az időt, ha enable_delivery == true
+            let header_time = if enable_delivery {
+                Some(Instant::now())
+            } else {
+                None
             };
 
             let mut object = group.create(hdr.size)?;
             let mut remain = hdr.size;
             let mut write_failed = false;
+            let mut deadline_exceeded = false;
 
             while remain > 0 {
+                // ✅ Deadline check CSAK HA enable_delivery == true
+                if let Some(start_time) = header_time {
+                    let elapsed_ms = start_time.elapsed().as_millis() as u64;
+                    if elapsed_ms > DEADLINE_THRESHOLD_MS {
+                        deadline_exceeded = true;
+                        write_failed = true;
+                        break;
+                    }
+                }
+
+                // Normál chunk olvasás
                 match reader.read_chunk(remain).await {
                     Ok(Some(bytes)) => {
                         remain -= bytes.len();
-                        if let Err(e) = object.write(bytes) {
-                            log::warn!("recv_subgroup: write failed (remain={}B): {e}; draining rest", remain);
+                        if let Err(_) = object.write(bytes) {
                             write_failed = true;
                             break;
                         }
                     }
                     Ok(None) => {
-                        log::debug!("recv_subgroup: truncated object (remain={}B), draining", remain);
                         write_failed = true;
                         break;
                     }
-                    Err(err) => {
-                        log::debug!("recv_subgroup: transport error: {err}; draining rest");
+                    Err(_) => {
                         write_failed = true;
                         break;
                     }
                 }
             }
 
-            if write_failed {
+            // Deadline túllépés - drop subgroup
+            if deadline_exceeded {
+                // Drain current object
+                while remain > 0 {
+                    if let Ok(Some(bytes)) = reader.read_chunk(remain).await {
+                        remain -= bytes.len();
+                    } else {
+                        break;
+                    }
+                }
+
+                // Drain remaining objects
+                while !reader.done().await.unwrap_or(true) {
+                    if let Ok(next_hdr) = reader.decode::<data::SubgroupObject>().await {
+                        let mut r = next_hdr.size;
+                        while r > 0 {
+                            if let Ok(Some(b)) = reader.read_chunk(r).await {
+                                r -= b.len();
+                            } else {
+                                break;
+                            }
+                        }
+                    } else {
+                        break;
+                    }
+                }
+
+                report.record_missing_frames(track_id.clone(), 1);
+                report.record_decoder_drop(track_id.clone(), 1);
+                return Ok(());
+            }
+
+            // Egyéb írási hibák
+            if write_failed && !deadline_exceeded {
                 while remain > 0 {
                     match reader.read_chunk(remain).await {
                         Ok(Some(bytes)) => remain -= bytes.len(),
-                        Ok(None) => {
-                            log::debug!("recv_subgroup: stream ended while draining failed object");
-                            return Ok(());
-                        }
-                        Err(e) => {
-                            log::debug!("recv_subgroup: error while draining failed object: {e}");
-                            return Ok(());
-                        }
+                        _ => return Ok(()),
                     }
                 }
                 report.record_missing_frames(track_id.clone(), 1);
                 report.record_decoder_drop(track_id.clone(), 1);
                 continue;
             }
+
+            object_count += 1;
         }
         Ok(())
-    }
+}
+
+
 
     pub fn recv_datagram(&mut self, datagram: bytes::Bytes) -> Result<(), SessionError> {
         let mut cursor = io::Cursor::new(datagram);

@@ -143,6 +143,7 @@ impl Publisher {
                 setup::Role::Publisher,
                 stats,
                 rate_limit,
+                false
             ).await?;
         Ok((session, publisher.unwrap()))
     }
