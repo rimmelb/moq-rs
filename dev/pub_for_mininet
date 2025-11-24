@@ -1,0 +1,83 @@
+#!/bin/bash
+set -euo pipefail
+
+# --- Projekt gyökér ---
+cd "$(dirname "$0")/.."
+
+# --- TLS cert generation (if missing) ---
+if [ ! -f dev/localhost.crt ] || [ ! -f dev/localhost.key ]; then
+  echo "Generating self-signed TLS certificate with OpenSSL..."
+  mkdir -p dev
+  openssl req -x509 -newkey rsa:2048 \
+    -keyout dev/localhost.key \
+    -out dev/localhost.crt \
+    -days 365 -nodes \
+    -subj "/CN=10.0.0.2"
+fi
+
+# --- Big Buck Bunny video preparation ---
+if [ ! -f dev/bbb.mp4 ]; then
+  echo "Downloading Big Buck Bunny..."
+  mkdir -p dev
+  wget http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4 -O dev/bbb.mp4
+fi
+
+# --- Ensure bbb.fmp4 is valid (has MOOF boxes) ---
+if [ ! -f dev/bbb.fmp4 ] || ! grep -qa "moof" dev/bbb.fmp4 2>/dev/null; then
+  echo "Converting to properly fragmented MP4 (CMAF)..."
+ffmpeg -y -hide_banner -v error -i dev/bbb.mp4 -an -c copy \
+  -f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer+frag_every_frame \
+  dev/bbb.fmp4
+
+  echo "Created CMAF-fragmented dev/bbb.fmp4"
+else
+  echo "Valid CMAF file found (dev/bbb.fmp4)"
+fi
+
+# --- Logging ---
+export RUST_LOG="debug"
+# --- Connection settings ---
+HOST="${HOST:-10.0.0.2}"
+PORT="${PORT:-4443}"
+ADDR="${ADDR:-$HOST:$PORT}"
+SCHEME="${SCHEME:-https}"
+NAMESPACE="${NAMESPACE:-bbb}"
+URL="${URL:-"$SCHEME://$ADDR"}"
+
+# --- Info ---
+echo "Watch URL: https://quic.video/watch/$NAMESPACE?server=$ADDR"
+
+# --- Rate limit ---
+PUB_RATE_LIMIT_MBPS=${PUB_RATE_LIMIT_MBPS:-"13"}
+
+if command -v bc >/dev/null 2>&1; then
+  PUB_RATE_LIMIT_BPS=$(echo "$PUB_RATE_LIMIT_MBPS * 1000000" | bc | cut -d. -f1)
+else
+  PUB_RATE_LIMIT_BPS=$(awk "BEGIN {printf \"%.0f\", $PUB_RATE_LIMIT_MBPS * 1000000}")
+fi
+
+echo "Rate limit set to: $PUB_RATE_LIMIT_MBPS Mbps ($PUB_RATE_LIMIT_BPS bps)"
+
+# --- RTT hint ---
+INITIAL_RTT_MS="${INITIAL_RTT_MS:-50}"
+EXTRA_ARGS=(--tls-disable-verify)
+if [ -n "${INITIAL_RTT_MS}" ]; then
+  EXTRA_ARGS+=(--initial-rtt-ms "${INITIAL_RTT_MS}")
+fi
+
+# --- Run publisher ---
+echo "Starting moq-pub..."
+ffmpeg -re -stream_loop -1 -i dev/bbb.fmp4 \
+  -an -c copy -f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer+frag_every_frame\
+  - | ./target/release/moq-pub \
+    --bandwidth-monitoring \
+    --rate-limit-bps "$PUB_RATE_LIMIT_BPS" \
+    --name "$NAMESPACE" "$URL" "${EXTRA_ARGS[@]}" "$@" \
+    > pub.log 2>&1 &
+
+
+PUB_PID=$!
+
+# --- Handle shutdown cleanly ---
+trap "echo 'Stopping publisher...'; kill $PUB_PID 2>/dev/null || true" SIGINT SIGTERM
+wait $PUB_PID

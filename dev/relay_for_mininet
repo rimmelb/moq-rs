@@ -1,0 +1,67 @@
+#!/bin/bash
+set -euo pipefail
+
+echo "=== MoQ Bandwidth Monitoring Setup ==="
+
+# Projekt gyökér
+cd "/home/user/moq-rs"
+
+# --- Csatlakozási beállítások (egységes a pub/sub-bal) ---
+HOST="${HOST:-10.0.0.2}"
+PORT="${PORT:-4443}"
+ADDR="${ADDR:-$HOST:$PORT}"
+BIND="${BIND:-[::]:$PORT}"   # hallgasson IPv4/IPv6-on
+
+# --- TLS cert (ha hiányzik, 10.0.0.2 CN-nel generáljuk) ---
+if [ ! -f dev/localhost.crt ] || [ ! -f dev/localhost.key ]; then
+  echo "Generating self-signed TLS certificate with OpenSSL (CN=$HOST)..."
+  mkdir -p dev
+  openssl req -x509 -newkey rsa:2048 \
+    -keyout dev/localhost.key \
+    -out dev/localhost.crt \
+    -days 365 -nodes \
+    -subj "/CN=${HOST}"
+fi
+CERT="${CERT:-dev/localhost.crt}"
+KEY="${KEY:-dev/localhost.key}"
+
+# --- Logging ---
+DETAILED_LOGS="${DETAILED_LOGS:-true}"
+
+if [ "$DETAILED_LOGS" = "true" ]; then
+  export RUST_LOG="trace,bbr.deadline=trace,quinn-proto=debug,quinn=debug,moq_transport::util::bandwidth_estimator=trace, moq_transport::util::cross_layer_metrics=debug,moq_transport::util::quic_metrics=debug,moq_transport::session=debug,moq_relay_ietf=info"
+  echo "Detailed bandwidth and cross-layer logging enabled"
+else
+  export RUST_LOG="info"
+  echo "Standard bandwidth logging enabled"
+fi
+
+echo "$RUST_LOG"
+
+# --- Bandwidth/RTT/timeout opciók ---
+RELAY_RATE_LIMIT_MBPS="${RELAY_RATE_LIMIT_MBPS:-20}"
+INITIAL_RTT_MS="${INITIAL_RTT_MS:-255}"
+DELIVERY_TIMEOUT="${DELIVERY_TIMEOUT:-50}"
+
+ARGS="--delivery-timeout $DELIVERY_TIMEOUT"
+
+if [ -n "$RELAY_RATE_LIMIT_MBPS" ]; then
+  ARGS="$ARGS --rate-limit-mbps $RELAY_RATE_LIMIT_MBPS"
+  echo "📉 Relay rate limit: ${RELAY_RATE_LIMIT_MBPS} Mbps"
+fi
+
+if [ -n "$INITIAL_RTT_MS" ]; then
+  ARGS="$ARGS --initial-rtt-ms $INITIAL_RTT_MS"
+fi
+
+# Opcionális announce/host
+if [ -n "${ANNOUNCE-}" ]; then
+  ARGS="$ARGS --announce $ANNOUNCE"
+fi
+
+# --- Relay indítás (release binárissal) ---
+./target/release/moq-relay-ietf \
+  --bind "$BIND" \
+  --tls-cert "$CERT" \
+  --tls-key "$KEY" \
+  --dev $ARGS "$@"

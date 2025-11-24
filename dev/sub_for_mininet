@@ -1,0 +1,43 @@
+#!/bin/bash
+set -euo pipefail
+
+cd "/home/user/moq-rs"
+export RUST_LOG="${RUST_LOG:-debug}"
+
+HOST="${HOST:-10.0.0.2}"
+PORT="${PORT:-4443}"
+ADDR="${ADDR:-$HOST:$PORT}"
+NAMESPACE="${NAMESPACE:-bbb}"
+
+# FONTOS: namespace URL
+URL="${URL:-"https://$ADDR/$NAMESPACE"}"
+
+SUB_RATE_LIMIT_MBPS="${SUB_RATE_LIMIT_MBPS:-13}"
+SUB_RATE_LIMIT_BPS="${SUB_RATE_LIMIT_BPS:-}"
+INITIAL_RTT_MS="${INITIAL_RTT_MS:-35}"
+
+ARGS="--tls-disable-verify"
+
+# Mbps → bps
+if [ -n "$SUB_RATE_LIMIT_MBPS" ]; then
+  if command -v bc >/dev/null 2>&1; then
+    SUB_RATE_LIMIT_BPS=$(echo "$SUB_RATE_LIMIT_MBPS * 1000000" | bc -l | cut -d. -f1)
+  else
+    SUB_RATE_LIMIT_BPS=$(awk "BEGIN {printf \"%.0f\", $SUB_RATE_LIMIT_MBPS * 1000000}")
+  fi
+fi
+
+if [ -n "$SUB_RATE_LIMIT_BPS" ]; then
+  ARGS="$ARGS --rate-limit-bps $SUB_RATE_LIMIT_BPS"
+fi
+if [ -n "$INITIAL_RTT_MS" ]; then
+  ARGS="$ARGS --initial-rtt-ms $INITIAL_RTT_MS"
+fi
+
+echo "=== Starting subscriber ==="
+echo "  URL: $URL"
+echo "  Rate limit: ${SUB_RATE_LIMIT_MBPS} Mbps (${SUB_RATE_LIMIT_BPS} bps)"
+echo "  RTT hint: ${INITIAL_RTT_MS} ms"
+echo ""
+
+./target/release/moq-sub --name "$NAMESPACE" "$URL" $ARGS "$@" | ffplay -
