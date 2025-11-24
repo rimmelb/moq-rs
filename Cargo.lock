@@ -1830,7 +1830,7 @@ dependencies = [
 [[package]]
 name = "quinn"
 version = "0.11.9"
-source = "git+https://github.com/rimmelb/quinn.git?branch=offset_watcher_drop#90c7b596377c0e5ce983cdd331edb4747cf9ba0f"
+source = "git+https://github.com/rimmelb/quinn.git?branch=relay-side-drop-implementation#034a1e72d6df25b9d2b842384b3092364f7d5d76"
 dependencies = [
  "bytes",
  "cfg_aliases",
@@ -1849,7 +1849,7 @@ dependencies = [
 [[package]]
 name = "quinn-proto"
 version = "0.11.13"
-source = "git+https://github.com/rimmelb/quinn.git?branch=offset_watcher_drop#90c7b596377c0e5ce983cdd331edb4747cf9ba0f"
+source = "git+https://github.com/rimmelb/quinn.git?branch=relay-side-drop-implementation#034a1e72d6df25b9d2b842384b3092364f7d5d76"
 dependencies = [
  "aws-lc-rs",
  "bytes",
@@ -1872,14 +1872,14 @@ dependencies = [
 [[package]]
 name = "quinn-udp"
 version = "0.5.14"
-source = "git+https://github.com/rimmelb/quinn.git?branch=offset_watcher_drop#90c7b596377c0e5ce983cdd331edb4747cf9ba0f"
+source = "git+https://github.com/rimmelb/quinn.git?branch=relay-side-drop-implementation#034a1e72d6df25b9d2b842384b3092364f7d5d76"
 dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
  "socket2 0.5.10",
  "tracing",
- "windows-sys 0.60.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3139,7 +3139,7 @@ dependencies = [
 [[package]]
 name = "web-transport"
 version = "0.9.6"
-source = "git+https://github.com/rimmelb/web-transport.git?branch=deadline_logic#61cbd10aff67e02e24f2837b78e79d19ece68708"
+source = "git+https://github.com/rimmelb/web-transport.git?branch=relay-side-drop-implementation#8afa14c1e3ab58ac23bc43da2aa22017c73c31b0"
 dependencies = [
  "bytes",
  "thiserror 2.0.17",
@@ -3151,7 +3151,7 @@ dependencies = [
 [[package]]
 name = "web-transport-proto"
 version = "0.2.7"
-source = "git+https://github.com/rimmelb/web-transport.git?branch=deadline_logic#61cbd10aff67e02e24f2837b78e79d19ece68708"
+source = "git+https://github.com/rimmelb/web-transport.git?branch=relay-side-drop-implementation#8afa14c1e3ab58ac23bc43da2aa22017c73c31b0"
 dependencies = [
  "bytes",
  "http 1.3.1",
@@ -3162,7 +3162,7 @@ dependencies = [
 [[package]]
 name = "web-transport-quinn"
 version = "0.8.1"
-source = "git+https://github.com/rimmelb/web-transport.git?branch=deadline_logic#61cbd10aff67e02e24f2837b78e79d19ece68708"
+source = "git+https://github.com/rimmelb/web-transport.git?branch=relay-side-drop-implementation#8afa14c1e3ab58ac23bc43da2aa22017c73c31b0"
 dependencies = [
  "bytes",
  "futures",
@@ -3181,7 +3181,7 @@ dependencies = [
 [[package]]
 name = "web-transport-trait"
 version = "0.1.1"
-source = "git+https://github.com/rimmelb/web-transport.git?branch=deadline_logic#61cbd10aff67e02e24f2837b78e79d19ece68708"
+source = "git+https://github.com/rimmelb/web-transport.git?branch=relay-side-drop-implementation#8afa14c1e3ab58ac23bc43da2aa22017c73c31b0"
 dependencies = [
  "bytes",
 ]
@@ -3189,7 +3189,7 @@ dependencies = [
 [[package]]
 name = "web-transport-wasm"
 version = "0.5.2"
-source = "git+https://github.com/rimmelb/web-transport.git?branch=deadline_logic#61cbd10aff67e02e24f2837b78e79d19ece68708"
+source = "git+https://github.com/rimmelb/web-transport.git?branch=relay-side-drop-implementation#8afa14c1e3ab58ac23bc43da2aa22017c73c31b0"
 dependencies = [
  "bytes",
  "js-sys",

@@ -157,7 +157,6 @@ impl Subscribed {
     }
 
     async fn serve_track(&mut self, _track: serve::StreamReader) -> Result<(), SessionError> {
-        // Stream módot egyelőre nem támogatunk (a projekt Subgroups módot használ).
         log::warn!("Stream mode is not supported; expected Subgroups mode");
         Err(SessionError::Serve(ServeError::Mode))
     }
@@ -218,24 +217,18 @@ async fn serve_one_subgroup(
     let sg_subgroup_id = header.subgroup_id;
     let sg_base_prio = subgroup.priority as i32;
 
-    //log::debug!("{:?}", publisher.get_rate_limit_mpbs());
     publisher.set_bandwidth(
         publisher.get_rate_limit_mpbs().map(|r| r as u32)
     );
     let mut stream = publisher.open_uni().await?;
     stream.set_priority(sg_base_prio);
 
-    if let Some(_time) = timeout {
-        let new_timeout = 100000000 as u64;
-        stream.set_deadline(Some(new_timeout));
-    }
     let mut writer = Writer::new(stream);
 
     let mut header_size = BytesMut::new();
     let header_msg: data::Header = header.clone().into();
     header_msg.encode(&mut header_size);
 
-    //size of the subgroupheader -> on top of the stream
     let subgroup_header_len = header_size.len();
 
     let time = std::time::SystemTime::now()
@@ -266,13 +259,13 @@ async fn serve_one_subgroup(
             object_id: object.object_id,
             size: object.size,
             status: object.status,
-            deadline: object.deadline
+            deadline: time
         };
         let ob_header = data::SubgroupObject{
             object_id: object.object_id,
             size: object.size,
             status: object.status,
-            deadline: object.deadline
+            deadline: time
         };
 
         let mut object_header_size = BytesMut::new();
@@ -284,7 +277,7 @@ async fn serve_one_subgroup(
         let size = size_of_object;
 
         //log::debug!("size of object: {:?} {:?}", size_of_object, object_header_len);
-        //time has to be inserted here to give it the quinn
+
         //writer.stream.append_object_size(size as u64, timeout, Some(time));
 
         log::debug!("{:?}", size as u64);

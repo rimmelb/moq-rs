@@ -77,7 +77,8 @@ impl Session {
         role: setup::Role,
         _rate_limit_bps: Option<f64>,
         stats: Option<Arc<dyn QuicStatsProvider + Send + Sync>>,
-        enable_delivery: bool
+        enable_delivery: bool,
+        deadline_threshold_ms: u64
     ) -> (Session, Option<Publisher>, Option<Subscriber>) {
         let (outgoing_send, outgoing_recv) = Queue::default().split();
 
@@ -103,7 +104,7 @@ impl Session {
                 (publisher, None)
             }
             setup::Role::Subscriber => {
-                let subscriber = Some(Subscriber::new(outgoing_send, enable_delivery));
+                let subscriber = Some(Subscriber::new(outgoing_send, enable_delivery, deadline_threshold_ms));
                 (None, subscriber)
             }
         };
@@ -122,7 +123,6 @@ impl Session {
         (session, publisher, subscriber)
     }
 
-    // Opcionális provider átadása Session-nek
     pub fn with_quic_stats_provider(
         mut self,
         provider: Option<Arc<dyn QuicStatsProvider + Send + Sync>>,
@@ -132,7 +132,6 @@ impl Session {
         self
     }
 
-    // Kényelmi wrapper: connect + provider beállítás
     pub async fn connect_role_with_stats(
         session: web_transport::Session,
         role: setup::Role,
@@ -189,7 +188,7 @@ impl Session {
                 _ => setup::Role::Publisher,
             },
         };
-        Ok(Session::new(session, sender, recver, role, None, None, false)) // None rate limit
+        Ok(Session::new(session, sender, recver, role, None, None, false, 0 as u64)) // None rate limit
     }
 
     // ÚJ: accept_with_stats
@@ -238,7 +237,7 @@ impl Session {
         log::debug!("sending server SETUP: {:?}", server);
         sender.encode(&server).await?;
 
-        let (session, pubr, subr) = Session::new(session, sender, recver, role, None, stats, false);
+        let (session, pubr, subr) = Session::new(session, sender, recver, role, None, stats, false, 0 as u64);
         Ok((session, pubr, subr))
     }
 
@@ -291,7 +290,7 @@ impl Session {
 
         log::debug!("sending server SETUP: {:?}", server);
         sender.encode(&server).await?;
-        Ok(Session::new(session, sender, recver, role, None, None, false)) // None rate limit
+        Ok(Session::new(session, sender, recver, role, None, None, false, 0 as u64)) // None rate limit
     }
 
     // Hiányzó metódusok hozzáadása
@@ -308,7 +307,8 @@ impl Session {
         role: setup::Role,
         stats: Option<Arc<dyn QuicStatsProvider + Send + Sync>>,
         rate_limit_mbps: Option<f64>,
-        enable_delivery: bool
+        enable_delivery: bool,
+        deadline_threshold_ms: u64
     ) -> Result<(Session, Option<Publisher>, Option<Subscriber>), SessionError> {
         let control = session.open_bi().await?;
 
@@ -346,7 +346,7 @@ impl Session {
         };
 
         // Biztosítsd, hogy a rate_limit_bps átkerül a Session::new-be
-        let (session, pubr, subr) = Session::new(session, sender, recver, role, rate_limit_mbps, stats, enable_delivery);
+        let (session, pubr, subr) = Session::new(session, sender, recver, role, rate_limit_mbps, stats, enable_delivery, deadline_threshold_ms);
 
         Ok((session, pubr, subr))
     }

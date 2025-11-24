@@ -143,7 +143,8 @@ impl Publisher {
                 setup::Role::Publisher,
                 stats,
                 rate_limit,
-                false
+                false,
+                0 as u64
             ).await?;
         Ok((session, publisher.unwrap()))
     }

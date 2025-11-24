@@ -17,10 +17,6 @@ use crate::watch::Queue;
 
 use super::{Announced, AnnouncedRecv, Reader, Session, SessionError, Subscribe, SubscribeRecv};
 
-const STALL_THRESHOLD: Duration = Duration::from_millis(750);
-const DEADLINE_THRESHOLD_MS: u64 = 20;
-
-
 // TODO remove Clone.
 #[derive(Clone)]
 pub struct Subscriber {
@@ -30,11 +26,12 @@ pub struct Subscriber {
     subscribe_next: Arc<atomic::AtomicU64>,
     outgoing: Queue<Message>,
     url: Arc<Mutex<String>>,
-    pub enable_delivery: bool
+    pub enable_delivery: bool,
+    pub deadline_threshold_ms: u64
 }
 
 impl Subscriber {
-    pub(super) fn new(outgoing: Queue<Message>, enable_delivery: bool) -> Self {
+    pub(super) fn new(outgoing: Queue<Message>, enable_delivery: bool, deadline_threshold_ms: u64) -> Self {
         Self {
             announced: Default::default(),
             announced_queue: Default::default(),
@@ -42,7 +39,8 @@ impl Subscriber {
             subscribe_next: Default::default(),
             outgoing,
             url: Arc::new(Mutex::new(String::new())),
-            enable_delivery
+            enable_delivery,
+            deadline_threshold_ms
         }
     }
 
@@ -231,27 +229,6 @@ impl Subscriber {
         self.announced.lock().unwrap().remove(namespace);
     }
 
-    // #[allow(dead_code)] // Keep for backwards compatibility
-    // pub(super) async fn recv_stream(
-    //     mut self,
-    //     stream: web_transport::RecvStream,
-    // ) -> Result<(), SessionError> {
-    //     let mut reader = Reader::new(stream);
-    //     let header: data::Header = reader.decode().await?;
-
-    //     let id = header.subscribe_id();
-
-    //     let res = self.recv_stream_inner(reader, header).await;
-    //     if let Err(SessionError::Serve(err)) = &res {
-    //         // The writer is closed, so we should teriminate.
-    //         // TODO it would be nice to do this immediately when the Writer is closed.
-    //         if let Some(subscribe) = self.subscribes.lock().unwrap().remove(&id) {
-    //             subscribe.error(err.clone())?;
-    //         }
-    //     }
-
-    //     res
-    // }
 
     pub(super) async fn recv_stream_with_bandwidth(
         mut self,
@@ -344,10 +321,11 @@ impl Subscriber {
         };
 
         let enable_delivery = self.enable_delivery;
+        let deadline_threshold = self.deadline_threshold_ms;
 
         match writer {
             Writer::Track(track) => Self::recv_track(track, reader).await?,
-            Writer::Subgroup(group) => Self::recv_subgroup(group, reader, report, enable_delivery).await?,
+            Writer::Subgroup(group) => Self::recv_subgroup(group, reader, report, enable_delivery, deadline_threshold).await?,
         };
 
         Ok(())
@@ -394,113 +372,93 @@ impl Subscriber {
 
 
 async fn recv_subgroup(
-        mut group: serve::SubgroupWriter,
-        mut reader: Reader,
-        report: Arc<MediaQoSReporter>,
-        enable_delivery: bool, // ✅ Új paraméter
-    ) -> Result<(), SessionError> {
-        let track_id = group.info.track.name.clone();
-        let mut object_count = 0;
+    mut group: serve::SubgroupWriter,
+    mut reader: Reader,
+    report: Arc<MediaQoSReporter>,
+    enable_delivery: bool,
+    deadline_threshold_ms: u64
+) -> Result<(), SessionError> {
+    let track_id = group.info.track.name.clone();
 
-        while !reader.done().await? {
-            let hdr: data::SubgroupObject = match reader.decode().await {
-                Ok(h) => h,
-                Err(_) => return Ok(()),
-            };
+    while !reader.done().await? {
+        let hdr: data::SubgroupObject = match reader.decode().await {
+            Ok(h) => h,
+            Err(_) => return Ok(()),
+        };
 
-            // ✅ Csak akkor mérjük az időt, ha enable_delivery == true
-            let header_time = if enable_delivery {
-                Some(Instant::now())
-            } else {
-                None
-            };
+        if enable_delivery {
+            let deadline_unix_ms = hdr.deadline;
+            if deadline_unix_ms > 0 {
+                let now_unix_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
 
-            let mut object = group.create(hdr.size)?;
-            let mut remain = hdr.size;
-            let mut write_failed = false;
-            let mut deadline_exceeded = false;
+                let effective_deadline_ms = deadline_unix_ms + deadline_threshold_ms;
 
-            while remain > 0 {
-                // ✅ Deadline check CSAK HA enable_delivery == true
-                if let Some(start_time) = header_time {
-                    let elapsed_ms = start_time.elapsed().as_millis() as u64;
-                    if elapsed_ms > DEADLINE_THRESHOLD_MS {
-                        deadline_exceeded = true;
-                        write_failed = true;
-                        break;
-                    }
-                }
+                if now_unix_ms > effective_deadline_ms {
+                    log::debug!(
+                        "subscriber-side deadline drop: track={} object={} (late by {}ms)",
+                        track_id,
+                        hdr.object_id,
+                        now_unix_ms.saturating_sub(deadline_unix_ms)
+                    );
 
-                // Normál chunk olvasás
-                match reader.read_chunk(remain).await {
-                    Ok(Some(bytes)) => {
-                        remain -= bytes.len();
-                        if let Err(_) = object.write(bytes) {
-                            write_failed = true;
+                    // Drain current object
+                    let mut remain = hdr.size;
+                    while remain > 0 {
+                        if let Ok(Some(bytes)) = reader.read_chunk(remain).await {
+                            remain -= bytes.len();
+                        } else {
                             break;
                         }
                     }
-                    Ok(None) => {
-                        write_failed = true;
-                        break;
-                    }
-                    Err(_) => {
-                        write_failed = true;
-                        break;
-                    }
-                }
-            }
 
-            // Deadline túllépés - drop subgroup
-            if deadline_exceeded {
-                // Drain current object
-                while remain > 0 {
-                    if let Ok(Some(bytes)) = reader.read_chunk(remain).await {
-                        remain -= bytes.len();
-                    } else {
-                        break;
-                    }
-                }
-
-                // Drain remaining objects
-                while !reader.done().await.unwrap_or(true) {
-                    if let Ok(next_hdr) = reader.decode::<data::SubgroupObject>().await {
-                        let mut r = next_hdr.size;
-                        while r > 0 {
-                            if let Ok(Some(b)) = reader.read_chunk(r).await {
-                                r -= b.len();
-                            } else {
-                                break;
+                    // Drain remaining objects
+                    while !reader.done().await.unwrap_or(true) {
+                        if let Ok(next_hdr) = reader.decode::<data::SubgroupObject>().await {
+                            let mut r = next_hdr.size;
+                            while r > 0 {
+                                if let Ok(Some(b)) = reader.read_chunk(r).await {
+                                    r -= b.len();
+                                } else {
+                                    break;
+                                }
                             }
+                        } else {
+                            break;
                         }
-                    } else {
+                    }
+
+                    report.record_missing_frames(track_id.clone(), 1);
+                    report.record_decoder_drop(track_id.clone(), 1);
+                    return Ok(()); // ✅ Subgroup-szintű drop
+                }
+            }
+        } // ✅ HIÁNYZOTT ez a záró }
+
+        // Normál feldolgozás (ha deadline OK)
+        let mut object = group.create(hdr.size)?;
+        let mut remain = hdr.size;
+
+        while remain > 0 {
+            match reader.read_chunk(remain).await {
+                Ok(Some(bytes)) => {
+                    remain -= bytes.len();
+                    if let Err(_) = object.write(bytes) {
+                        report.record_missing_frames(track_id.clone(), 1);
                         break;
                     }
                 }
-
-                report.record_missing_frames(track_id.clone(), 1);
-                report.record_decoder_drop(track_id.clone(), 1);
-                return Ok(());
-            }
-
-            // Egyéb írási hibák
-            if write_failed && !deadline_exceeded {
-                while remain > 0 {
-                    match reader.read_chunk(remain).await {
-                        Ok(Some(bytes)) => remain -= bytes.len(),
-                        _ => return Ok(()),
-                    }
+                Ok(None) | Err(_) => {
+                    report.record_missing_frames(track_id.clone(), 1);
+                    break;
                 }
-                report.record_missing_frames(track_id.clone(), 1);
-                report.record_decoder_drop(track_id.clone(), 1);
-                continue;
             }
-
-            object_count += 1;
         }
-        Ok(())
+    }
+    Ok(())
 }
-
 
 
     pub fn recv_datagram(&mut self, datagram: bytes::Bytes) -> Result<(), SessionError> {

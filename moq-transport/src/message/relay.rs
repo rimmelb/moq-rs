@@ -1,4 +1,4 @@
-use crate::message::{self, FixBandwidth, Message};
+use crate::message::{self, Message};
 use std::fmt;
 
 macro_rules! relay_msgs {

@@ -60,8 +60,7 @@ async fn connect_to_other_session(
                 bind: config.bind,
                 tls,
             },
-            config.rate_limit_bps,      // was: Some(3 * 1000000)
-            config.initial_rtt_ms,      // was: Some(50)
+            Some(0),
         )?;
 
         // Quinn session + provider
@@ -69,7 +68,8 @@ async fn connect_to_other_session(
         let provider: Option<Arc<dyn moq_transport::session::QuicStatsProvider + Send + Sync>> =
             provider.map(|p| p as Arc<_>);
 
-        let enable_delivery = true;
+        let enable_delivery = config.enable_delivery;
+        let deadline_threshold_ms = config.deadline_threshold_ms;
 
         // Hozz létre Subscriber session-t rate limit támogatással
         let (session, subscriber) = {
@@ -77,8 +77,9 @@ async fn connect_to_other_session(
                 wt_session,
                 moq_transport::setup::Role::Subscriber,
                 provider,
-                config.rate_limit_bps.map(|r| r as f64),
-                enable_delivery
+                Some(0.0),
+                enable_delivery,
+                deadline_threshold_ms
             ).await?;
             (session, sub_opt.expect("subscriber role"))
         };
@@ -135,13 +136,11 @@ pub struct Config {
     #[command(flatten)]
     pub tls: moq_native_ietf::tls::Args,
 
-    /// Set a client-side rate limit (bps) for SUB's outgoing writes (control)
     #[arg(long)]
-    pub rate_limit_bps: Option<u32>,
+    pub enable_delivery: bool,
 
-    /// Initial RTT hint in milliseconds for QUIC (passed to transport)
-    #[arg(long, value_name="MS")]
-    pub initial_rtt_ms: Option<u32>,
+    #[arg(long)]
+    pub deadline_threshold_ms: u64
 }
 
 fn moq_url(s: &str) -> Result<Url, String> {

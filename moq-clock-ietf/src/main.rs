@@ -59,8 +59,7 @@ async fn main() -> anyhow::Result<()> {
         tls,
     },
     Some(12500 * 1000),
-    Some(100),
-)?;
+    )?;
 
     log::info!("connecting to server: url={}", config.url);
 

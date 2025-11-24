@@ -53,7 +53,6 @@ async fn main() -> anyhow::Result<()> {
         tls,
     },
     Some(0),
-    Some(0),
     )?;
 
     let mut quic = quic.server.context("missing server certificate")?;

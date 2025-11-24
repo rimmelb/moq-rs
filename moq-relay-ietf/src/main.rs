@@ -118,9 +118,7 @@ async fn main() -> anyhow::Result<()> {
             node: cli.node,
             api: cli.api,
             announce: cli.announce,
-            bandwidth_monitoring: cli.bandwidth_monitoring,
             rate_limit_bps: cli.rate_limit_mbps,
-            rtt_ms: cli.initial_rtt_ms,
             delivery_timeout: cli.delivery_timeout
         },
         shared_state.clone(),

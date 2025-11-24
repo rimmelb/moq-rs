@@ -13,10 +13,10 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
-web-transport = { git = "https://github.com/rimmelb/web-transport.git", branch = "deadline_logic", package = "web-transport" }
-web-transport-quinn     = { git = "https://github.com/rimmelb/web-transport.git", branch = "deadline_logic", package = "web-transport-quinn" }
-web-transport-proto     = { git = "https://github.com/rimmelb/web-transport.git", branch = "deadline_logic", package = "web-transport-proto" }
-web-transport-trait     = { git = "https://github.com/rimmelb/web-transport.git", branch = "deadline_logic", package = "web-transport-trait" }
+web-transport = { git = "https://github.com/rimmelb/web-transport.git", branch = "relay-side-drop-implementation", package = "web-transport" }
+web-transport-quinn     = { git = "https://github.com/rimmelb/web-transport.git", branch = "relay-side-drop-implementation", package = "web-transport-quinn" }
+web-transport-proto     = { git = "https://github.com/rimmelb/web-transport.git", branch = "relay-side-drop-implementation", package = "web-transport-proto" }
+web-transport-trait     = { git = "https://github.com/rimmelb/web-transport.git", branch = "relay-side-drop-implementation", package = "web-transport-trait" }
 env_logger = "0.11"
 log = { version = "0.4", features = ["std"] }
 
@@ -25,8 +25,8 @@ log = { version = "0.4", features = ["std"] }
 debug = true
 
 [patch.crates-io]
-quinn       = { git = "https://github.com/rimmelb/quinn.git", branch = "offset_watcher_drop", package = "quinn" }
-quinn-proto = { git = "https://github.com/rimmelb/quinn.git", branch = "offset_watcher_drop", package = "quinn-proto" }
+quinn       = { git = "https://github.com/rimmelb/quinn.git", branch = "relay-side-drop-implementation", package = "quinn" }
+quinn-proto = { git = "https://github.com/rimmelb/quinn.git", branch = "relay-side-drop-implementation", package = "quinn-proto" }
 
 [patch."https://github.com/quinn-rs/quinn"]
-quinn-proto = { git = "https://github.com/rimmelb/quinn.git", branch = "offset_watcher_drop", package = "quinn-proto" }
+quinn-proto = { git = "https://github.com/rimmelb/quinn.git", branch = "relay-side-drop-implementation", package = "quinn-proto" }

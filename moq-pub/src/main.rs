@@ -153,7 +153,6 @@ async fn connect_to_other_session(cli: Cli, mut url: Url, r: TracksReader) -> an
             tls: tls.clone(),
         },
         cli.rate_limit_bps,
-        cli.initial_rtt_ms,
         )?;
 
         log::info!("Connecting to relay: url={}", url);

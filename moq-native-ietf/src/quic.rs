@@ -88,9 +88,7 @@ impl QuicStatsProvider for QuinnStatsProvider {
 }
 
 impl Endpoint {
-    pub fn new(config: Config, _rate_limit: Option<u32>, rtt: Option<u32>) -> anyhow::Result<Self> {
-        // Enable BBR congestion control
-        // TODO validate the implementation
+    pub fn new(config: Config, _rate_limit: Option<u32>) -> anyhow::Result<Self> {
         let mut transport = quinn::TransportConfig::default();
 
     transport
@@ -101,10 +99,6 @@ impl Endpoint {
         .initial_mtu(1200)
         .min_mtu(1200);
 
-    if let Some(rtt_ms) = rtt {
-        transport.initial_rtt(time::Duration::from_millis(rtt_ms as u64));
-    }
-
     // ---- BBR hard-cap ----
     let bbr = quinn::congestion::BbrConfig::default()
         .enable_deadline_scheduler(false)
@@ -113,7 +107,6 @@ impl Endpoint {
         .default_mss(1200);
 
     transport.congestion_controller_factory(Arc::new(bbr));
-
 
         let transport = Arc::new(transport);
 

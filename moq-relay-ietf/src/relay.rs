@@ -27,14 +27,8 @@ pub struct RelayConfig {
     /// We use QUIC, so the certificate must be valid for this address.
     pub node: Option<Url>,
 
-    /// Bandwidth monitoring interval in seconds (None = disabled)
-    pub bandwidth_monitoring: Option<u64>,
-
     /// Rate limit for outgoing connections (bits per second)
     pub rate_limit_bps: Option<u32>,
-
-    /// Initial RTT hint in milliseconds for QUIC transport
-    pub rtt_ms: Option<u32>, // <- NEW
 
     /// Delivery timeout in seconds for the relay to wait for a consumer to connect
     pub delivery_timeout: Option<u64>
@@ -48,7 +42,6 @@ pub struct Relay {
     remotes: Option<(RemotesProducer, RemotesConsumer)>,
     shared_state: SharedState,
     relay_stopping_state: SharedState,
-    bandwidth_monitoring: Option<u64>,
     rate_limit_bps: Option<u32>, // új mező
     delivery_timeout: Option<u64>, // új mező
 }
@@ -68,7 +61,6 @@ impl Relay {
             tls: config.tls,
         },
         config.rate_limit_bps,
-        config.rtt_ms,
         )?;
 
         let api = if let (Some(url), Some(node)) = (config.api, config.node) {
@@ -96,7 +88,6 @@ impl Relay {
             remotes,
             shared_state,
             relay_stopping_state,
-            bandwidth_monitoring: config.bandwidth_monitoring,
             rate_limit_bps: config.rate_limit_bps, // új mező
             delivery_timeout: config.delivery_timeout, // új mező
         })
@@ -130,7 +121,8 @@ impl Relay {
                     moq_transport::setup::Role::Both,
                     provider.clone(),
                     Some(rate),
-                    false
+                    false,
+                    0 as u64
                 )
                 .await
                 .context("failed to establish forward session with rate limit")?
@@ -174,7 +166,6 @@ impl Relay {
         // Clone néhány értéket a loop előtt
         let locals = self.locals.clone();
         let api = self.api.clone();
-        let bandwidth_monitoring = self.bandwidth_monitoring;
 
         loop {
             tokio::select! {
