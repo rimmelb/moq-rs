@@ -99,6 +99,9 @@ impl Endpoint {
         .initial_mtu(1200)
         .min_mtu(1200);
 
+        transport.initial_rtt(time::Duration::from_millis(100 as u64));
+
+
     // ---- BBR hard-cap ----
     let bbr = quinn::congestion::BbrConfig::default()
         .enable_deadline_scheduler(false)

@@ -78,15 +78,13 @@ impl Subscribed {
         (send, recv)
     }
 
-    pub async fn serve(mut self, track: serve::TrackReader, delivery_timeout: Option<u64>, _shared_state: SharedState, enable_deadline_scheduler: bool, report: Arc<MediaQoSReporter>) -> Result<(), SessionError> {
+    pub async fn serve(mut self, track: serve::TrackReader, delivery_timeout: Option<u64>, _shared_state: SharedState, enable_deadline_scheduler: bool, report: Arc<MediaQoSReporter>, enable_relay_side_drop: bool,
+    enable_link_capacity_information: bool) -> Result<(), SessionError> {
         let delivery_timeout_ms = self.msg.delivery_timeout_ms;
 
         let effective_timeout = match (delivery_timeout_ms, delivery_timeout) {
-            // ha van delivery_timeout_ms és nem 0 → ezt használjuk
             (Some(ms), _) if ms > 0 => Some(ms),
-            // ha 0 vagy None → ha van delivery_timeout, azt használjuk
             (_, Some(t)) => Some(t),
-            // különben nincs timeout
             _ => None,
         };
 
@@ -95,19 +93,15 @@ impl Subscribed {
                 conn.set_deadline_scheduler(enable_deadline_scheduler);
                 let now = Instant::now();
                 let _deadline = now + Duration::from_millis(timeout_ms);
-                // ezt az értéket adod át a serve_inner-nek
             }
         }
 
-        let res = self.serve_inner(track, effective_timeout, report).await;
-        // if let Err(err) = &res {
-        //     //self.close(err.clone().into())?;
-        // }
-
+        let res = self.serve_inner(track, effective_timeout, report, enable_relay_side_drop, enable_link_capacity_information).await;
         res
     }
 
-    async fn serve_inner(&mut self, track: serve::TrackReader, timeout: Option<u64>, report: Arc<MediaQoSReporter>) -> Result<(), SessionError> {
+    async fn serve_inner(&mut self, track: serve::TrackReader, timeout: Option<u64>, report: Arc<MediaQoSReporter>, enable_relay_side_drop: bool,
+    enable_link_capacity_information: bool) -> Result<(), SessionError> {
         let latest = track.latest();
         self.state
             .lock_mut()
@@ -126,7 +120,7 @@ impl Subscribed {
         match track.mode().await? {
             // TODO cancel track/datagrams on closed
             TrackReaderMode::Stream(stream) => self.serve_track(stream).await,
-            TrackReaderMode::Subgroups(subgroups) => self.serve_subgroup(subgroups, timeout, report).await,
+            TrackReaderMode::Subgroups(subgroups) => self.serve_subgroup(subgroups, timeout, report, enable_relay_side_drop, enable_link_capacity_information).await,
             TrackReaderMode::Datagrams(datagrams) => self.serve_datagrams(datagrams).await,
         }
     }
@@ -165,7 +159,9 @@ impl Subscribed {
         &mut self,
         mut subgroups: serve::SubgroupsReader,
         timeout: Option<u64>,
-        report: Arc<MediaQoSReporter>
+        report: Arc<MediaQoSReporter>,
+        enable_relay_side_drop: bool,
+        enable_link_capacity_information: bool
     ) -> Result<(), SessionError> {
         let mut tasks = FuturesUnordered::new();
         let mut done: Option<Result<(), ServeError>> = None;
@@ -188,7 +184,7 @@ impl Subscribed {
                         let reporter = report.clone();
 
                         tasks.push(async move {
-                            if let Err(err) = Self::serve_one_subgroup(header, subgroup, publisher, state, timeout, reporter).await {
+                            if let Err(err) = Self::serve_one_subgroup(header, subgroup, publisher, state, timeout, reporter, enable_relay_side_drop, enable_link_capacity_information).await {
                                 log::warn!("failed to serve group: {:?}, error: {}", info, err);
                             }
                         });
@@ -210,16 +206,22 @@ async fn serve_one_subgroup(
     mut publisher: Publisher,
     state: State<SubscribedState>,
     timeout: Option<u64>,
-    report: Arc<MediaQoSReporter>
+    report: Arc<MediaQoSReporter>,
+    enable_relay_side_drop: bool,
+    enable_link_capacity_information: bool
+
 ) -> Result<(), SessionError> {
 
     let sg_group_id = header.group_id;
     let sg_subgroup_id = header.subgroup_id;
     let sg_base_prio = subgroup.priority as i32;
 
+    if enable_link_capacity_information {
     publisher.set_bandwidth(
         publisher.get_rate_limit_mpbs().map(|r| r as u32)
     );
+    }
+
     let mut stream = publisher.open_uni().await?;
     stream.set_priority(sg_base_prio);
 
@@ -236,7 +238,10 @@ async fn serve_one_subgroup(
                 .unwrap_or_default()
                 .as_millis() as u64;
 
-    //writer.stream.append_object_size(subgroup_header_len as u64, timeout, Some(time));
+
+    if enable_relay_side_drop {
+    writer.stream.append_object_size(subgroup_header_len as u64, timeout, Some(time));
+    }
 
     if let Err(e) = writer.encode(&header_msg).await {
         log::debug!(
@@ -272,15 +277,12 @@ async fn serve_one_subgroup(
         ob_header.encode(&mut object_header_size);
 
         //size of the objectheader
-        let object_header_len = object_header_size.len();
         let size_of_object = object.size;
         let size = size_of_object;
 
-        //log::debug!("size of object: {:?} {:?}", size_of_object, object_header_len);
-
-        //writer.stream.append_object_size(size as u64, timeout, Some(time));
-
-        log::debug!("{:?}", size as u64);
+        if enable_relay_side_drop {
+        writer.stream.append_object_size(size as u64, timeout, Some(time));
+        }
 
         if let Err(e) = writer.encode(&ob_hdr).await {
             log::warn!(

@@ -17,17 +17,18 @@ NAME="${NAME:-bbb}"
 # Combine the host and name into a URL.
 URL="${URL:-"https://$ADDR/$NAME"}"
 
-ENABLE_DELIVERY="${ENABLE_DELIVERY:-true}"
+ENABLE_DELIVERY="${ENABLE_DELIVERY:-false}"
 
-DEADLINE_THRESHOLD_MS="${DEADLINE_THRESHOLD_MS:-10}"
-
-# Build CLI args for moq-sub
 ARGS=""
 
 # Only add the flag if ENABLE_DELIVERY is true
 if [ "$ENABLE_DELIVERY" = "true" ]; then
     ARGS="$ARGS --enable-delivery"
 fi
+
+DEADLINE_THRESHOLD_MS="${DEADLINE_THRESHOLD_MS:-50}"
+
+# Build CLI args for moq-sub
 
 ARGS="$ARGS --deadline-threshold-ms $DEADLINE_THRESHOLD_MS"
 

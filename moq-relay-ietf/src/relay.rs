@@ -31,7 +31,11 @@ pub struct RelayConfig {
     pub rate_limit_bps: Option<u32>,
 
     /// Delivery timeout in seconds for the relay to wait for a consumer to connect
-    pub delivery_timeout: Option<u64>
+    pub delivery_timeout: Option<u64>,
+
+    pub enable_drop: bool,
+
+    pub enable_link: bool
 }
 
 pub struct Relay {
@@ -44,12 +48,13 @@ pub struct Relay {
     relay_stopping_state: SharedState,
     rate_limit_bps: Option<u32>, // új mező
     delivery_timeout: Option<u64>, // új mező
+    enable_drop: bool,
+    enable_link: bool
 }
 
 //for Goaway -> curl -X POST "https://localhost:4443/goaway?url=https://localhost:4442&timeout=5"
 
 impl Relay {
-    // ITT lehet állítani az RTT értékét
     // Create a QUIC endpoint that can be used for both clients and servers.
     pub fn new(
         config: RelayConfig,
@@ -88,8 +93,10 @@ impl Relay {
             remotes,
             shared_state,
             relay_stopping_state,
-            rate_limit_bps: config.rate_limit_bps, // új mező
-            delivery_timeout: config.delivery_timeout, // új mező
+            rate_limit_bps: config.rate_limit_bps,
+            delivery_timeout: config.delivery_timeout,
+            enable_drop: config.enable_drop,
+            enable_link: config.enable_link
         })
     }
 
@@ -150,7 +157,7 @@ impl Relay {
 
 
             tasks.push(
-                async move { session.run(shared_state, self.delivery_timeout.clone()).await.context("forwarding failed") }.boxed(),
+                async move { session.run(shared_state, self.delivery_timeout.clone(), false, false).await.context("forwarding failed") }.boxed(),
             );
 
             forward
@@ -166,6 +173,9 @@ impl Relay {
         // Clone néhány értéket a loop előtt
         let locals = self.locals.clone();
         let api = self.api.clone();
+
+        let enable_relay_side_drop = self.enable_drop;
+        let enable_link_capacity_information = self.enable_link;
 
         loop {
             tokio::select! {
@@ -200,7 +210,7 @@ impl Relay {
                         };
 
 
-                        if let Err(err) = session.run(shared_state, self.delivery_timeout.clone()).await {
+                        if let Err(err) = session.run(shared_state, self.delivery_timeout.clone(), enable_relay_side_drop, enable_link_capacity_information).await {
                             log::warn!("failed to run MoQ session: {}", err);
                         }
 

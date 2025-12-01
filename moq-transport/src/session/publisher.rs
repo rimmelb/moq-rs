@@ -7,7 +7,7 @@ use futures::{stream::FuturesUnordered, StreamExt};
 use tokio::sync::Mutex as TokioMutex;
 
 use crate::{
-    coding::Tuple, message::{self, Message}, serve::{ServeError, TracksReader}, session::SharedState, setup, util::{BandwidthEstimator, MediaQoSReporter}
+    coding::Tuple, message::{self, Message}, serve::{ServeError, TracksReader}, session::SharedState, setup, util::MediaQoSReporter
 };
 
 use crate::watch::Queue;
@@ -222,7 +222,7 @@ impl Publisher {
             let something= 50 as u64;
             let shared_state = SharedState::new();
             let deliver = Some(something);
-            if let Err(err) = subscribe.serve(track, deliver, shared_state, false, report).await {
+            if let Err(err) = subscribe.serve(track, deliver, shared_state, false, report, false, false).await {
                 match err {
                     SessionError::Serve(ServeError::Cancel) => {
                         log::debug!("subscription {:?} cancelled by peer; treating as drop", info);
@@ -236,7 +236,7 @@ impl Publisher {
                         log::debug!(
                             "subscription {:?} closed by peer (code={}): treating as drop",
                             info,
-                            code
+                            code,
                         );
                         return Ok(());
                     }

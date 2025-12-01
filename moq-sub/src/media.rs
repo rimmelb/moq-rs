@@ -2,19 +2,19 @@ use std::{io::Cursor, sync::Arc, collections::HashMap};
 use anyhow::Context;
 use log::{debug, info, warn};
 use moq_transport::serve::{
-    SubgroupObjectReader, SubgroupReader, TrackReader, TrackReaderMode,
+    SubgroupObjectReader, SubgroupReader, TrackReaderMode,
     Tracks, TracksReader, TracksWriter,
 };
 use moq_transport::session::Subscriber;
 use moq_transport::util::MediaQoSReporter;
-use mp4::{ReadBox, BoxHeader, MoofBox};
+use mp4::{ReadBox, BoxHeader};
 use tokio::{
     io::{AsyncReadExt, AsyncWrite, AsyncWriteExt},
     sync::Mutex,
     task::JoinSet,
     fs,
 };
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 // -----------------------------------------------------------------------------
 // Struct definition
@@ -220,7 +220,6 @@ async fn write_subgroup_paired(
 
     fs::create_dir_all("tmp/sub").await.ok();
 
-    // ✅ JAVÍTOTT: Load publisher manifest with relative timestamps
     let track_id: u32 = track_name.split('.').next()
         .unwrap().parse().unwrap_or(1);
     let pub_manifest_path = format!("tmp/pub_manifest_track{}.txt", track_id);
@@ -232,17 +231,13 @@ async fn write_subgroup_paired(
         for line in manifest_content.lines() {
             let parts: Vec<&str> = line.split('|').collect();
             if parts.len() >= 6 {
-                // Parse: group_id|object_id|track_id|pts|duration|capture_unix_us
                 if let (Ok(object_id), Ok(capture_unix_us)) = (
                     parts[1].parse::<u64>(),
                     parts[5].parse::<u64>(),
                 ) {
-                    // ✅ First timestamp is reference point
                     if publisher_start_time.is_none() {
                         publisher_start_time = Some(capture_unix_us);
                     }
-
-                    // ✅ Store as relative duration from start
                     let relative_duration = Duration::from_micros(
                         capture_unix_us.saturating_sub(publisher_start_time.unwrap())
                     );
@@ -250,13 +245,12 @@ async fn write_subgroup_paired(
                 }
             }
         }
-        info!("✅ Loaded {} capture timestamps from publisher manifest",
+        info!("Loaded {} capture timestamps from publisher manifest",
             capture_timestamps.len());
     } else {
-        warn!("⚠️ Publisher manifest not found: {}", pub_manifest_path);
+        warn!("Publisher manifest not found: {}", pub_manifest_path);
     }
 
-    // ✅ Reference time for relative timestamps
     let subscriber_start = Instant::now();
 
     while let Some(object) = group.next().await? {
@@ -317,18 +311,16 @@ async fn write_subgroup_paired(
                 let (start_pts, duration_secs) =
                     parse_fragment_timing(&fused, timescale).unwrap_or((0.0, 0.042));
 
-                // ✅ JAVÍTOTT: Use relative timestamp
                 let capture_ts = capture_timestamps
                     .get(&moof_pending.object_id)
                     .map(|relative_duration| subscriber_start + *relative_duration)
                     .or_else(|| {
-                        // Fallback: use receive time - RTT estimate
                         let estimated_rtt = Duration::from_millis(50);
                         moof_pending.received_at.checked_sub(estimated_rtt / 2)
                     });
 
                 if capture_ts.is_none() {
-                    warn!("⚠️ No capture timestamp for object_id={}",
+                    warn!("No capture timestamp for object_id={}",
                         moof_pending.object_id);
                 }
 
@@ -342,16 +334,14 @@ async fn write_subgroup_paired(
                 );
                 frame_sequence += 1;
 
-                // ✅ Log TRUE latency
                 if let Some(cap_ts) = capture_ts {
                     let latency = render_start.duration_since(cap_ts);
                     if frame_sequence % 100 == 0 {
-                        info!("📊 TRUE End-to-end latency: {:.2}ms (frame {})",
+                        info!("TRUE End-to-end latency: {:.2}ms (frame {})",
                             latency.as_secs_f64() * 1000.0, frame_sequence);
                     }
                 }
 
-                // ✅ Stall detection
                 if let Some(last_render) = last_render_time {
                     let expected_gap = Duration::from_secs_f64(duration_secs);
                     let actual_gap = render_start.duration_since(last_render);
@@ -360,19 +350,17 @@ async fn write_subgroup_paired(
                     if actual_gap > expected_gap + stall_threshold {
                         let stall_duration = actual_gap - expected_gap;
                         reporter.record_playback_stall(&track_name, stall_duration);
-                        warn!("⚠️ Playback stall detected: {:.2}ms",
+                        warn!("Playback stall detected: {:.2}ms",
                             stall_duration.as_secs_f64() * 1000.0);
                     }
                 }
                 last_render_time = Some(render_start);
 
-                // ✅ Startup delay (first frame only)
                 if frame_sequence == 1 {
                     let startup_delay = playback_start.elapsed();
                     reporter.record_startup_delay(&track_name, startup_delay);
                 }
 
-                // ✅ Subscriber manifest
                 let manifest_path = format!("tmp/sub/sub_manifest_track{}.txt", track_id);
                 let mut manifest = fs::OpenOptions::new()
                     .create(true)
@@ -389,7 +377,6 @@ async fn write_subgroup_paired(
                     duration_secs
                 ).as_bytes()).await?;
 
-                // ✅ Periodic reporting
                 if frame_sequence % 100 == 0 {
                     reporter.maybe_log_snapshot();
                 }
@@ -398,7 +385,6 @@ async fn write_subgroup_paired(
         }
     }
 
-    // ✅ Final report
     reporter.maybe_log_snapshot();
 
     Ok(())

@@ -36,7 +36,9 @@ impl Producer {
         mut self,
         delivery_timeout: Option<u64>,
         shared_state: SharedState,
-        reporter: Arc<MediaQoSReporter>
+        reporter: Arc<MediaQoSReporter>,
+        enable_relay_side_drop: bool,
+        enable_link_capacity_information: bool
     ) -> Result<(), SessionError> {
         let mut tasks = FuturesUnordered::new();
         loop {
@@ -48,7 +50,7 @@ impl Producer {
                     tasks.push(async move {
                         let info = subscribe.info.clone();
                         let report = value.clone();
-                        if let Err(err) = this.clone().serve(subscribe, delivery_timeout, shared_state, report).await {
+                        if let Err(err) = this.clone().serve(subscribe, delivery_timeout, shared_state, report, enable_relay_side_drop, enable_link_capacity_information).await {
                             log::warn!("failed serving subscribe: {:?}, error: {}", info, err)
                         }
                     });
@@ -61,12 +63,12 @@ impl Producer {
 }
 
 impl Producer {
-    async fn serve(self, subscribe: Subscribed, delivery_timeout: Option<u64>, shared_state: SharedState, reporter: Arc<MediaQoSReporter>) -> Result<(), anyhow::Error> {
+    async fn serve(self, subscribe: Subscribed, delivery_timeout: Option<u64>, shared_state: SharedState, reporter: Arc<MediaQoSReporter>, enable_relay_side_drop: bool, enable_link_capacity_information: bool) -> Result<(), anyhow::Error> {
         if let Some(mut local) = self.locals.route(&subscribe.info.namespace) {
             if let Some(track) = local.subscribe(&subscribe.info.name) {
                 log::info!("serving from local: {:?}", track.info);
                 let report = reporter.clone();
-                return Ok(subscribe.serve(track, delivery_timeout.clone(), shared_state.clone(), true, report).await?);
+                return Ok(subscribe.serve(track, delivery_timeout.clone(), shared_state.clone(), true, report, enable_relay_side_drop, enable_link_capacity_information).await?);
             }
         }
         if let Some(remotes) = &self.remotes {
@@ -76,7 +78,7 @@ impl Producer {
                 {
                     log::info!("serving from remote: {:?} {:?}", remote.info, track.info);
                     let report = reporter.clone();
-                    return Ok(subscribe.serve(track.reader, delivery_timeout.clone(), shared_state.clone(), true, report).await?);
+                    return Ok(subscribe.serve(track.reader, delivery_timeout.clone(), shared_state.clone(), true, report, enable_relay_side_drop, enable_link_capacity_information).await?);
                 }
             }
         }

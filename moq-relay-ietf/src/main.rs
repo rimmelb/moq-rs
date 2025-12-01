@@ -94,6 +94,11 @@ pub struct Cli {
 
     #[arg(long)]
     pub delivery_timeout: Option<u64>,
+
+    #[arg(long)]
+    pub enable_relay_drop: bool,
+    #[arg(long)]
+    pub enable_link_capacity: bool
 }
 
 #[tokio::main]
@@ -119,7 +124,9 @@ async fn main() -> anyhow::Result<()> {
             api: cli.api,
             announce: cli.announce,
             rate_limit_bps: cli.rate_limit_mbps,
-            delivery_timeout: cli.delivery_timeout
+            delivery_timeout: cli.delivery_timeout,
+            enable_drop: cli.enable_relay_drop,
+            enable_link: cli.enable_link_capacity
         },
         shared_state.clone(),
         relay_stopping_state.clone(),

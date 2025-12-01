@@ -12,17 +12,15 @@ pub struct Session {
 }
 
 impl Session {
-    pub async fn run(self, shared_state: SharedState, delivery_timeout: Option<u64>) -> Result<(), SessionError> {
+    pub async fn run(self, shared_state: SharedState, delivery_timeout: Option<u64>, enable_relay_side_drop: bool, enable_link_capacity_information: bool) -> Result<(), SessionError> {
     let mut tasks = FuturesUnordered::new();
 
-    // előbb mentsd el, ami kell
     let reporter = self.session.media_qos_reporter.clone();
 
-    // ezután move-old a session-t
     tasks.push(self.session.run(shared_state.clone()).boxed());
 
     if let Some(producer) = self.producer {
-        tasks.push(producer.run(delivery_timeout.clone(), shared_state.clone(), reporter.clone()).boxed());
+        tasks.push(producer.run(delivery_timeout.clone(), shared_state.clone(), reporter.clone(), enable_relay_side_drop, enable_link_capacity_information).boxed());
     }
 
     if let Some(consumer) = self.consumer {

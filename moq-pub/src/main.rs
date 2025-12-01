@@ -22,11 +22,9 @@ use tracing_subscriber::{fmt, EnvFilter};
 use tracing_subscriber::prelude::*;
 
 fn init_tracing() {
-    // RUST_LOG-al is felülírható, pl.:
     // RUST_LOG="bbr.deadline=debug,moq_transport=info,quinn=warn" cargo run -- ...
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| {
-            // Alapértelmezett: bbr.deadline=debug, Quinn csak warn
             "bbr.sg=debug,moq_transport=info,quinn=warn,moq_native_ietf=info".parse().unwrap()
         });
 
@@ -34,8 +32,8 @@ fn init_tracing() {
         .with_target(true)
         .with_thread_ids(false)
         .with_level(true)
-        .with_ansi(false)       // szint is látszódjon
-        .compact();             // kompakt, egy soros formátum
+        .with_ansi(false)
+        .compact();
 
     tracing_subscriber::registry()
         .with(filter)

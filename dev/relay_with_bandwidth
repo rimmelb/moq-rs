@@ -62,6 +62,16 @@ DELIVERY_TIMEOUT="${DELIVERY_TIMEOUT:-60}"
 
 ARGS="$ARGS --delivery-timeout $DELIVERY_TIMEOUT"
 
+ENABLE_RELAY_DROP="${ENABLE_RELAY_DROP:-true}"
+if [ "$ENABLE_RELAY_DROP" = "true" ]; then
+    ARGS="$ARGS --enable-relay-drop"
+fi
+
+ENABLE_LINK_CAPACITY="${ENABLE_LINK_CAPACITY:-false}"
+if [ "$ENABLE_LINK_CAPACITY" = "true" ]; then
+    ARGS="$ARGS --enable-link-capacity"
+fi
+
 echo ""
 echo "Configuration:"
 echo "  - Server: https://localhost:$PORT"

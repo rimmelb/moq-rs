@@ -12,7 +12,7 @@ use futures::StreamExt;
 use moq_native_ietf::quic;
 use moq_transport::coding::Tuple;
 use moq_transport::serve::{
-    Track, TrackReader, TrackWriter, Tracks, TracksReader, TracksRequest, TracksWriter,
+    Track, TrackReader, TrackWriter,
 };
 use moq_transport::session::SharedState;
 use moq_transport::watch::State;

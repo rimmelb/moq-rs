@@ -2,7 +2,6 @@ use std::{
     collections::{hash_map, HashMap},
     io,
     sync::{atomic, Arc, Mutex},
-    time::{Duration, Instant},
 };
 
 use crate::{
@@ -395,6 +394,8 @@ async fn recv_subgroup(
                     .as_millis() as u64;
 
                 let effective_deadline_ms = deadline_unix_ms + deadline_threshold_ms;
+
+                log::debug!("delivery enabled: now={:?}, effective_deadline={:?}", now_unix_ms, effective_deadline_ms);
 
                 if now_unix_ms > effective_deadline_ms {
                     log::debug!(

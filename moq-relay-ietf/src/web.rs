@@ -4,13 +4,11 @@ use axum::{
     extract::{Query, State},
     http::Method,
     response::IntoResponse,
-    routing::get,
+    routing::{get, post},
     Router,
 };
-use hyper_serve::tls_rustls::RustlsAcceptor;
 use moq_transport::session::SharedState;
 use serde::Deserialize;
-use axum::routing::post;
 use tower_http::cors::{Any, CorsLayer};
 
 #[derive(Deserialize)]
@@ -41,10 +39,10 @@ pub struct WebConfig {
 }
 
 // Run a HTTP server using Axum
-// TODO remove this when Chrome adds support for self-signed certificates using WebTransport
 pub struct Web {
     app: Router,
-    server: hyper_serve::Server<RustlsAcceptor>,
+    bind: net::SocketAddr,
+    tls: Arc<rustls::ServerConfig>,
 }
 
 impl Web {
@@ -59,17 +57,16 @@ impl Web {
 
         let mut tls = config.tls.server.expect("missing server configuration");
         tls.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-        let tls = hyper_serve::tls_rustls::RustlsConfig::from_config(Arc::new(tls));
+        let tls = Arc::new(tls);
 
-        // Clone the shared state for use in the `/update` handler.
+        // Clone the shared state for use in handlers
         let shared_state = config.shared_state.clone();
-        let _relay_stopping_state = config.relay_stopping_state.clone(); // silence unused for now
 
         let app = Router::new()
             .route("/fingerprint", get(serve_fingerprint))
             .route(
                 "/goaway",
-                axum::routing::post({
+                post({
                     let shared_state = shared_state.clone();
                     move |Query(params): Query<GoawayParams>| {
                         let shared_state = shared_state.clone();
@@ -91,7 +88,6 @@ impl Web {
                     }
                 }),
             )
-            // ÚJ: dinamikus rate limit
             .route(
                 "/rate_limit",
                 post({
@@ -102,7 +98,7 @@ impl Web {
                             let bps = if let Some(b) = params.bps {
                                 b
                             } else if let Some(m) = params.mbps {
-                                m as u64
+                                (m * 1_000_000.0) as u64
                             } else {
                                 return "Missing 'bps' or 'mbps'".into_response();
                             };
@@ -115,7 +111,7 @@ impl Web {
             .route(
                 "/deadline_scheduler",
                 post({
-                    let shared_state = config.shared_state.clone();
+                    let shared_state = shared_state.clone();
                     move |Query(params): Query<DeadlineParams>| {
                         let shared_state = shared_state.clone();
                         async move {
@@ -144,13 +140,16 @@ impl Web {
             )
             .with_state(fingerprint);
 
-        let server = hyper_serve::bind_rustls(config.bind, tls);
-
-        Self { app, server }
+        Self { app, bind: config.bind, tls }
     }
 
     pub async fn run(self) -> anyhow::Result<()> {
-        self.server.serve(self.app.into_make_service()).await?;
+        let tls_config = axum_server::tls_rustls::RustlsConfig::from_config(self.tls);
+
+        axum_server::bind_rustls(self.bind, tls_config)
+            .serve(self.app.into_make_service())
+            .await?;
+
         Ok(())
     }
 }
