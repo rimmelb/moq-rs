@@ -56,8 +56,6 @@ else
   PUB_RATE_LIMIT_BPS=$(awk "BEGIN {printf \"%.0f\", $PUB_RATE_LIMIT_MBPS * 1000000}")
 fi
 
-echo "Rate limit set to: $PUB_RATE_LIMIT_MBPS Mbps ($PUB_RATE_LIMIT_BPS bps)"
-
 # --- RTT hint ---
 INITIAL_RTT_MS="${INITIAL_RTT_MS:-50}"
 EXTRA_ARGS=(--tls-disable-verify)

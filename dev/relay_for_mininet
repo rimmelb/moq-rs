@@ -42,6 +42,8 @@ echo "$RUST_LOG"
 RELAY_RATE_LIMIT_MBPS="${RELAY_RATE_LIMIT_MBPS:-20}"
 INITIAL_RTT_MS="${INITIAL_RTT_MS:-255}"
 DELIVERY_TIMEOUT="${DELIVERY_TIMEOUT:-50}"
+ENABLE_RELAY_DROP="${ENABLE_RELAY_DROP:-true}"
+ENABLE_LINK_CAPACITY="${ENABLE_LINK_CAPACITY:-false}"
 
 ARGS="--delivery-timeout $DELIVERY_TIMEOUT"
 
@@ -57,6 +59,14 @@ fi
 # Opcionális announce/host
 if [ -n "${ANNOUNCE-}" ]; then
   ARGS="$ARGS --announce $ANNOUNCE"
+fi
+
+if [ "$ENABLE_RELAY_DROP" = "true" ]; then
+    ARGS="$ARGS --enable-relay-drop"
+fi
+
+if [ "$ENABLE_LINK_CAPACITY" = "true" ]; then
+    ARGS="$ARGS --enable-link-capacity"
 fi
 
 # --- Relay indítás (release binárissal) ---
