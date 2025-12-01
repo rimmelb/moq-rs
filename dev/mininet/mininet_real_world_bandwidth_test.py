@@ -9,36 +9,57 @@ import os
 import time
 import threading
 
-def link_bandwidth_modifier(net, delay_seconds=300, target_bw=10):
-    time.sleep(delay_seconds)
+#To run: sudo python3 mininet_real_world_bandwidth_test.py --bandwidth-file home/user/moq-rs/tools/param.txt
 
+def bandwidth_controller(net, bandwidth_file):
+    """Háttérszál a sávszélesség vezérléshez"""
     relay = net.get('relay')
-    sub = net.get('sub')
-    s1 = net.get('s1')
 
-    timestamp = time.strftime("%H:%M:%S")
+    # Kis várakozás, hogy a relay teljesen elinduljon
+    time.sleep(8)
+
+    log_file = 'bandwidth_controller.log'
 
     try:
-        link_relay = relay.connectionsTo(s1)[0]
-        link_sub = sub.connectionsTo(s1)[0]
+        with open(log_file, 'w') as log:
+            log.write(f"Bandwidth Controller - Started at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            log.write("="*60 + "\n")
+            log.flush()
 
-        msg = f"\n[{timestamp}] *** Link sávszélesség módosítás: relay és sub linkek -> {target_bw} Mbps\n"
-        print(msg, flush=True)
-        info(msg)
+            with open(bandwidth_file, 'r') as f:
+                for line in f:
+                    mbps = line.strip()
+                    if mbps and mbps.isdigit():
+                        # Curl parancs: csak status code
+                        result = relay.cmd(
+                            f'curl -k -X POST "https://10.0.0.2:4443/rate_limit?mbps={mbps}" '
+                            f'-w "%{{http_code}}" -o /dev/null -s'
+                        )
 
-        link_relay[0].config(bw=target_bw)
-        link_sub[0].config(bw=target_bw)
+                        status_code = result.strip()
+                        timestamp = time.strftime("%H:%M:%S")
 
-        success_msg = f"[{timestamp}] *** Módosítás sikeres!\n"
-        print(success_msg, flush=True)
-        info(success_msg)
+                        if status_code == "200":
+                            msg = f"[{timestamp}] {mbps} Mbps - Sikerült beállítani\n"
+                        else:
+                            msg = f"[{timestamp}] {mbps} Mbps - Hiba (HTTP {status_code})\n"
+
+                        # Konzolra és fájlba is
+                        print(msg, end='', flush=True)
+                        log.write(msg)
+                        log.flush()
+
+                        time.sleep(1)
+
+            final_msg = f"\nBandwidth controller befejezve - {time.strftime('%H:%M:%S')}\n"
+            print(final_msg, flush=True)
+            log.write(final_msg)
 
     except Exception as e:
-        error_msg = f"[{timestamp}] *** Link módosítás hiba: {e}\n"
+        error_msg = f'Bandwidth controller hiba: {e}\n'
         print(error_msg, flush=True)
-        info(error_msg)
 
-def start(bw_pr=500.0, bw_bottleneck=500.0, bw_sr=500.0, delay_ms='10ms', loss=0.0):
+def start(bw_pr=500.0, bw_bottleneck=500.0, bw_sr=500.0, delay_ms='10ms', loss=0.0, bandwidth_file=None):
     setLogLevel('info')
     net = Mininet(controller=OVSController, link=TCLink, autoSetMacs=True)
 
@@ -50,9 +71,9 @@ def start(bw_pr=500.0, bw_bottleneck=500.0, bw_sr=500.0, delay_ms='10ms', loss=0
     sub   = net.addHost('sub',   ip='10.0.0.3/24')
 
     # Linkek
-    net.addLink(pub,   s1, bw=bw_pr,         delay=delay_ms, loss=loss, max_queue_size=600)
-    net.addLink(relay, s1, bw=bw_bottleneck, delay=delay_ms, loss=loss, max_queue_size=600)
-    net.addLink(sub,   s1, bw=bw_sr,         delay=delay_ms, loss=loss, max_queue_size=600)
+    net.addLink(pub,   s1, bw=bw_pr,         delay=delay_ms, loss=loss, max_queue_size=400)
+    net.addLink(relay, s1, bw=bw_bottleneck, delay=delay_ms, loss=loss, max_queue_size=400)
+    net.addLink(sub,   s1, bw=bw_sr,         delay=delay_ms, loss=loss, max_queue_size=400)
 
     net.start()
 
@@ -88,24 +109,27 @@ def start(bw_pr=500.0, bw_bottleneck=500.0, bw_sr=500.0, delay_ms='10ms', loss=0
     info('*** fut: relay.log / pub.log / sub.log a repo gyökerében\n')
     info('*** Mininet CLI: pl. link újrakonfigurálás: link s1-relay bw 0.3 delay 80ms\n')
 
-    link_thread = threading.Thread(
-        target=link_bandwidth_modifier,
-        args=(net, 298, 10),
-        daemon=True
-    )
-    link_thread.start()
-    info(f'*** Link módosítás ütemezve 5 perc múlva (300 másodperc)\n')
-    info(f'*** Célsávszélesség: 10 Mbps (relay és sub linkek)\n')
+    # Bandwidth controller indítása háttérben, ha meg van adva fájl
+    if bandwidth_file and os.path.exists(bandwidth_file):
+        controller_thread = threading.Thread(
+            target=bandwidth_controller,
+            args=(net, bandwidth_file),
+            daemon=True
+        )
+        controller_thread.start()
+        info(f'*** Bandwidth controller elindítva: {bandwidth_file}\n')
+        info(f'*** Log követése: tail -f bandwidth_controller.log\n')
 
     CLI(net)
     net.stop()
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--bw-pr', type=float, default=100.0, help='pub–switch bw (Mbit/s)')
-    parser.add_argument('--bw-bottleneck', type=float, default=100.0, help='relay–switch bw (Mbit/s)')
-    parser.add_argument('--bw-sr', type=float, default=100.0, help='sub–switch bw (Mbit/s)')
-    parser.add_argument('--delay', default='3ms', help='link delay (e.g. 50ms)')
+    parser.add_argument('--bw-pr', type=float, default=500.0, help='pub–switch bw (Mbit/s)')
+    parser.add_argument('--bw-bottleneck', type=float, default=500.0, help='relay–switch bw (Mbit/s)')
+    parser.add_argument('--bw-sr', type=float, default=500.0, help='sub–switch bw (Mbit/s)')
+    parser.add_argument('--delay', default='10ms', help='link delay (e.g. 50ms)')
     parser.add_argument('--loss', type=float, default=0.0, help='packet loss percent')
+    parser.add_argument('--bandwidth-file', type=str, default=None, help='Bandwidth értékek fájlja (pl. param.txt)')
     args = parser.parse_args()
-    start(args.bw_pr, args.bw_bottleneck, args.bw_sr, args.delay, args.loss)
+    start(args.bw_pr, args.bw_bottleneck, args.bw_sr, args.delay, args.loss, args.bandwidth_file)

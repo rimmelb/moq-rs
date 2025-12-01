@@ -92,14 +92,6 @@ def start(bw_pr=500.0, bw_bottleneck=500.0, bw_sr=500.0, delay_ms='10ms', loss=0
     info('*** fut: relay.log / pub.log / sub.log a repo gyökerében\n')
     info('*** Mininet CLI: pl. link újrakonfigurálás: link s1-relay bw 0.3 delay 80ms\n')
 
-    # Link bandwidth modifier indítása háttérben - 5 perc után 10 Mbps
-    link_thread = threading.Thread(
-        target=link_bandwidth_modifier,
-        args=(net, 298, 10),
-        daemon=True
-    )
-    link_thread.start()
-
     CLI(net)
     net.stop()
 

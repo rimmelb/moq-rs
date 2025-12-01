@@ -395,8 +395,6 @@ async fn recv_subgroup(
 
                 let effective_deadline_ms = deadline_unix_ms + deadline_threshold_ms;
 
-                log::debug!("delivery enabled: now={:?}, effective_deadline={:?}", now_unix_ms, effective_deadline_ms);
-
                 if now_unix_ms > effective_deadline_ms {
                     log::debug!(
                         "subscriber-side deadline drop: track={} object={} (late by {}ms)",
@@ -433,10 +431,10 @@ async fn recv_subgroup(
 
                     report.record_missing_frames(track_id.clone(), 1);
                     report.record_decoder_drop(track_id.clone(), 1);
-                    return Ok(()); // ✅ Subgroup-szintű drop
+                    return Ok(());
                 }
             }
-        } // ✅ HIÁNYZOTT ez a záró }
+        }
 
         // Normál feldolgozás (ha deadline OK)
         let mut object = group.create(hdr.size)?;

@@ -4,7 +4,7 @@ set -euo pipefail
 echo "=== MoQ Bandwidth Monitoring Setup ==="
 
 # Projekt gyökér
-cd "/home/user/moq-rs"
+cd "$(dirname "$0")/.."
 
 # --- Csatlakozási beállítások (egységes a pub/sub-bal) ---
 HOST="${HOST:-10.0.0.2}"
