@@ -106,3 +106,159 @@ Licensed under either:
 
 -   Apache License, Version 2.0, ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
 -   MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
+
+
+
+# MoQ Relay-Side Drop Testing Guide
+
+This guide describes how to set up and test the relay-side drop implementation for Media over QUIC (MoQ).
+
+## Prerequisites
+
+- Ubuntu Linux
+- Mininet network emulator
+- Rust toolchain (cargo)
+
+Install Mininet:
+sudo apt-get install mininet
+
+## Installation
+
+Clone the repository:
+git clone --branch relay-side-drop-implementation --single-branch https://github.com/rimmelb/moq-rs.git moq-rs-relay-side-drop
+cd moq-rs-relay-side-drop
+
+
+Build the project:
+cargo build --release
+
+Make the scripts executable:
+cd dev
+chmod +x relay_for_mininet pub_for_mininet sub_for_mininet
+
+
+## Configuration
+
+### Test Scenarios
+
+Configure the following parameters in the respective scripts before running tests.
+
+#### Scenario 1: Relay-side drop with link information
+
+**In `relay_for_mininet`:**
+- `ENABLE_RELAY_DROP=true`
+- `ENABLE_LINK_CAPACITY=true`
+
+**In `sub_for_mininet`:**
+- `ENABLE_DELIVERY=false`
+
+#### Scenario 2: Relay-side drop without link information
+
+**In `relay_for_mininet`:**
+- `ENABLE_RELAY_DROP=true`
+- `ENABLE_LINK_CAPACITY=false`
+
+**In `sub_for_mininet`:**
+- `ENABLE_DELIVERY=false`
+
+#### Scenario 3: Subscriber-side drop
+
+**In `relay_for_mininet`:**
+- `ENABLE_RELAY_DROP=false`
+- `ENABLE_LINK_CAPACITY=false`
+
+**In `sub_for_mininet`:**
+- `ENABLE_DELIVERY=true`
+
+### Tunable Parameters
+
+#### Relay-side drop parameters
+- **Delivery timeout:** Modify `DELIVERY_TIMEOUT` in `relay_for_mininet`
+- **Link capacity:** Modify `RELAY_RATE_LIMIT_MBPS` in `relay_for_mininet`
+
+#### Subscriber-side drop parameters
+- **Delivery timeout:** Modify `DEADLINE_THRESHOLD_MS` in `sub_for_mininet`
+
+#### Fixed bandwidth testing
+For subscriber-side drop testing, set the link capacity between relay and subscriber to the desired fixed bandwidth value.
+
+## Running Tests
+
+Navigate to the mininet directory:
+cd dev/mininet
+
+### Test 1: Fixed Bandwidth
+sudo python3 mininet_test.py
+
+### Test 2: Bandwidth Drop at Half-Time
+sudo python3 mininet_halftime_test.py
+
+### Test 3: Dynamic Bandwidth
+sudo python3 mininet_real_world_bandwidth_test.py --bandwidth-file /home/user/moq-rs-relay-side-drop/tools/param.txt
+
+**Note:** First-time execution may encounter startup issues. Simply retry if this occurs.
+
+## Evaluation
+
+### Pre-Test Preparation
+
+Before each test, clear the temporary directory:
+rm -rf tmp/*
+
+### Post-Test Analysis
+
+After the video stream completes, run the post-processing script:
+sudo python3 tools/post_processing.py
+
+
+### Results
+
+The evaluation results are saved to `tmp/comprehensive_results.json` with the following structure:
+
+{
+"qos": {
+"vmaf": 98.742497,
+"psnr": "Infinity",
+"ssim": 1.0
+},
+"qoe": {
+"vmaf": 84.869567,
+"psnr": 15.81,
+"ssim": 0.731159,
+"perceptual_score": 73.46083446430755,
+"freeze_events": 1929,
+"freeze_duration_sec": 81.018,
+"video_duration_sec": 535.878,
+"freeze_ratio": 0.1511873971314366
+},
+"delivery": {
+"total_sent": 12759,
+"total_received": 10830,
+"loss_rate_percent": 15.118739713143665,
+"lost_bytes": 21093662,
+"sync_time_sec": 2.5
+}
+}
+
+### Metrics Explanation
+
+- **qos:** Quality of Service metrics measuring technical video quality (not relevant)
+- **qoe:** Quality of Experience metrics (primary evaluation metrics)
+  - `vmaf`: Video Multi-Method Assessment Fusion score
+  - `psnr`: Peak Signal-to-Noise Ratio
+  - `ssim`: Structural Similarity Index
+  - `perceptual_score`: Overall perceptual quality score
+  - `freeze_events`: Number of video freeze occurrences
+  - `freeze_duration_sec`: Total duration of freezes
+  - `video_duration_sec`: Total video duration
+  - `freeze_ratio`: Ratio of freeze time to total duration
+- **delivery:** Network delivery statistics
+
+**The primary evaluation results are in the `qoe` section.**
+
+## Troubleshooting
+
+- If scripts fail on first run, retry the command
+- Ensure `tmp/` directory exists and is writable
+- Verify all scripts have execute permissions
+- Check that the bandwidth file path is correct for dynamic tests
