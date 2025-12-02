@@ -9,8 +9,6 @@ import os
 import time
 import threading
 
-#To run: sudo python3 mininet_real_world_bandwidth_test.py --bandwidth-file home/user/moq-rs/tools/param.txt
-
 def bandwidth_controller(net, bandwidth_file):
     """Háttérszál a sávszélesség vezérléshez"""
     relay = net.get('relay')
