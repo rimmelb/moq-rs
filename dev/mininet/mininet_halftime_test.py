@@ -33,12 +33,24 @@ def link_bandwidth_modifier(net, delay_seconds=300, target_bw=10):
         # Sub oldali interfész módosítása
         link_sub[0].config(bw=target_bw)
 
-        success_msg = f"\n[{timestamp}] *** Módosítás sikeres"
+        # Curl hívás a relay rate_limit endpointjára
+        result = relay.cmd(
+            f'curl -k -X POST "https://10.0.0.2:4443/rate_limit?mbps={target_bw}" '
+            f'-w "%{{http_code}}" -o /dev/null -s'
+        )
+
+        status_code = result.strip()
+        
+        if status_code == "200":
+            success_msg = f"\n[{timestamp}] *** Módosítás sikeres (relay rate limit is beállítva: {target_bw} Mbps, HTTP {status_code})"
+        else:
+            success_msg = f"\n[{timestamp}] *** Módosítás sikeres (figyelem: relay rate limit HTTP {status_code})"
+        
         print(success_msg, flush=True)
         info(success_msg)
 
     except Exception as e:
-        error_msg = f"\n[{timestamp}] *** Módosítás sikertelen"
+        error_msg = f"\n[{timestamp}] *** Módosítás sikertelen: {e}"
         print(error_msg, flush=True)
         info(error_msg)
 
