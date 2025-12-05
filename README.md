@@ -184,6 +184,11 @@ For subscriber-side drop testing, set the link capacity between relay and subscr
 
 ## Running Tests
 
+First, step into the main directory, then run the following commands:
+./dev/relay_for_mininet
+./dev/pub_for_mininet
+./dev/sub_for_mininet
+
 Navigate to the mininet directory:
 cd dev/mininet
 
